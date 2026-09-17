@@ -1,0 +1,19 @@
+{
+  "name": "projecthub",
+  "version": "1.0.0",
+  "private": true,
+  "description": "ProjectHub - Project and team management platform",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev:web": "npm --workspace apps/web run dev -- --host 0.0.0.0",
+    "dev:api": "npm --workspace apps/api run dev",
+    "dev": "npm run dev:web"
+  },
+  "engines": {
+    "node": ">=20.0.0",
+    "npm": ">=10.0.0"
+  }
+}
