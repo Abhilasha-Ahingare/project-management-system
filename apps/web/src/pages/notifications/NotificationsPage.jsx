@@ -1,6 +1,7 @@
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { Bell, Check, CheckCheck, Trash2, X } from "lucide-react";
 import { useState } from "react";
+import { useNavigate } from "react-router-dom";
 import { toast } from "react-toastify";
 import { invitations, notifications } from "../../api/resources.api";
 import { apiMessage } from "../../api/client";
@@ -8,6 +9,7 @@ import { Loading, Failed, Empty } from "../../components/ui/States";
 const list = (value) =>
   Array.isArray(value) ? value : value?.items || value?.data || [];
 export default function NotificationsPage() {
+  const navigate = useNavigate();
   const qc = useQueryClient();
   const [selectedIds, setSelectedIds] = useState([]);
   const query = useQuery({
@@ -26,12 +28,19 @@ export default function NotificationsPage() {
   });
   const respond = useMutation({
     mutationFn: ({ id, decision }) => invitations.respond(id, decision),
-    onSuccess: (_, variables) => {
+    onSuccess: (result, variables) => {
       qc.invalidateQueries({ queryKey: ["invitations", "pending"] });
       qc.invalidateQueries({ queryKey: ["notifications"] });
       qc.invalidateQueries({ queryKey: ["projects"] });
       qc.invalidateQueries({ queryKey: ["teams"] });
       toast.success(`Invitation ${variables.decision}.`);
+      if (variables.decision === "accepted") {
+        if (result?.targetType === "CollaborationProject") {
+          navigate(`/collaboration/${result.targetId}`);
+        } else if (result?.targetType === "Collaboration") {
+          toast.info("Open the project collaboration area to join this board.");
+        }
+      }
     },
     onError: (error) =>
       toast.error(apiMessage(error, "Unable to respond to invitation")),

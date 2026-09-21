@@ -38,6 +38,8 @@ const env = {
   smtpPassword: process.env.SMTP_PASSWORD,
   smtpSecure: process.env.SMTP_SECURE === "true",
   mailFrom: process.env.MAIL_FROM || "ProjectHub <no-reply@projecthub.local>",
+  openaiApiKey: process.env.OPENAI_API_KEY || "",
+  openaiModel: process.env.OPENAI_MODEL || "gpt-4o-mini",
 };
 
 export default env;

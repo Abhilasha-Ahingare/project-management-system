@@ -15,7 +15,9 @@ import {
   Send,
   Trash2,
   UserPlus,
+  UserMinus,
   Users,
+  X,
 } from "lucide-react";
 import { toast } from "react-toastify";
 import { collaboration, projects } from "../../api/resources.api";
@@ -37,11 +39,13 @@ const memberLabel = (member) => {
     : "Team member";
 };
 
-function BoardCanvas({ boardId, isEditor, snapshot }) {
+function BoardCanvas({ boardId, isEditor, snapshot, onPresence }) {
   const token = localStorage.getItem("projecthub_access_token");
   const apiRef = useRef(null);
   const socketRef = useRef(null);
   const saveTimer = useRef(null);
+  const presenceRef = useRef(onPresence);
+  presenceRef.current = onPresence;
   const initialData = snapshot?.elements
     ? {
         elements: snapshot.elements,
@@ -67,10 +71,22 @@ function BoardCanvas({ boardId, isEditor, snapshot }) {
       if (remote.files) apiRef.current.addFiles(Object.values(remote.files));
     };
     socket.on("collaboration_board_updated", applyRemoteUpdate);
+    const joined = (participant) =>
+      presenceRef.current?.({ type: "joined", participant });
+    const left = (participant) =>
+      presenceRef.current?.({ type: "left", participant });
+    socket.on("collaboration_participant_joined", joined);
+    socket.on("collaboration_participant_left", left);
+    socket.on("collaboration_participants", (participants) =>
+      presenceRef.current?.({ type: "roster", participants }),
+    );
     return () => {
       if (saveTimer.current) window.clearTimeout(saveTimer.current);
       socket.emit("leave_collaboration_board", boardId);
       socket.off("collaboration_board_updated", applyRemoteUpdate);
+      socket.off("collaboration_participant_joined", joined);
+      socket.off("collaboration_participant_left", left);
+      socket.off("collaboration_participants");
       socket.disconnect();
       socketRef.current = null;
     };
@@ -110,6 +126,11 @@ export default function CollaborationPage() {
   const [chatText, setChatText] = useState("");
   const [selectedMemberIds, setSelectedMemberIds] = useState([]);
   const [invitePermission, setInvitePermission] = useState("editor");
+  const [chatOpen, setChatOpen] = useState(false);
+  const [inviteOpen, setInviteOpen] = useState(false);
+  const [sessionTitle, setSessionTitle] = useState("Collaboration session");
+  const [activeParticipants, setActiveParticipants] = useState([]);
+  const [selectedSessionId, setSelectedSessionId] = useState(null);
 
   const projectList = useQuery({
     queryKey: ["collaboration-projects"],
@@ -139,6 +160,11 @@ export default function CollaborationPage() {
     queryKey: ["collaboration-sessions", boardId],
     queryFn: () => collaboration.sessions(boardId),
     enabled: Boolean(boardId),
+  });
+  const sessionDetails = useQuery({
+    queryKey: ["collaboration-session", selectedSessionId],
+    queryFn: () => collaboration.sessionDetails(selectedSessionId),
+    enabled: Boolean(selectedSessionId),
   });
   const history = useQuery({
     queryKey: ["collaboration-history", boardId],
@@ -190,10 +216,21 @@ export default function CollaborationPage() {
     },
     onSuccess: () => {
       setSelectedMemberIds([]);
+      qc.invalidateQueries({ queryKey: ["collaboration-project", projectId] });
       toast.success("Collaboration invitations sent.");
     },
     onError: (error) =>
       toast.error(apiMessage(error, "Unable to invite collaborators")),
+  });
+  const removeCollaborator = useMutation({
+    mutationFn: (userId) =>
+      collaboration.removeProjectMember(projectId, userId),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["collaboration-project", projectId] });
+      toast.success("Member removed from collaboration.");
+    },
+    onError: (error) =>
+      toast.error(apiMessage(error, "Unable to remove collaboration member")),
   });
   const removeBoard = useMutation({
     mutationFn: () => collaboration.removeBoard(boardId),
@@ -225,7 +262,7 @@ export default function CollaborationPage() {
       toast.error(apiMessage(error, "Unable to send collaboration message")),
   });
   const startSession = useMutation({
-    mutationFn: () => collaboration.startSession(boardId),
+    mutationFn: (data) => collaboration.startSession(boardId, data),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["collaboration-sessions", boardId] });
       toast.success("Collaboration session started.");
@@ -237,11 +274,34 @@ export default function CollaborationPage() {
     mutationFn: (sessionId) => collaboration.endSession(sessionId),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["collaboration-sessions", boardId] });
+      qc.invalidateQueries({ queryKey: ["collaboration-board", boardId] });
       qc.invalidateQueries({ queryKey: ["collaboration-history", boardId] });
       toast.success("Session ended and summary saved.");
     },
     onError: (error) =>
       toast.error(apiMessage(error, "Unable to end collaboration session")),
+  });
+  const continueSession = useMutation({
+    mutationFn: (session) =>
+      collaboration.continueSession(session._id, {
+        title: `Continuation of ${session.title || "collaboration"}`,
+      }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["collaboration-sessions", boardId] });
+      qc.invalidateQueries({ queryKey: ["collaboration-board", boardId] });
+      toast.success("New session started from the saved board.");
+    },
+    onError: (error) =>
+      toast.error(apiMessage(error, "Unable to continue collaboration")),
+  });
+  const leaveSession = useMutation({
+    mutationFn: (sessionId) => collaboration.leaveSession(sessionId),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["collaboration-sessions", boardId] });
+      toast.success("You left the collaboration session.");
+    },
+    onError: (error) =>
+      toast.error(apiMessage(error, "Unable to leave session")),
   });
 
   const members = useMemo(() => {
@@ -298,7 +358,37 @@ export default function CollaborationPage() {
   const inviteMembers = members.filter(
     (member) => String(idOf(member)) !== String(currentUserId),
   );
-
+  const acceptedCollaboratorIds = new Set(
+    (selectedProject.data?.collaborators || [])
+      .filter((item) => item.status === "accepted")
+      .map((item) => String(idOf(item.user))),
+  );
+  const pendingCollaboratorIds = new Set(
+    (selectedProject.data?.pendingCollaborators || []).map((item) =>
+      String(idOf(item)),
+    ),
+  );
+  const updatePresence = (event) => {
+    if (event.type === "roster") {
+      setActiveParticipants(event.participants || []);
+      return;
+    }
+    if (event.type === "joined" && event.participant) {
+      setActiveParticipants((current) => [
+        ...current.filter(
+          (item) => String(idOf(item)) !== String(idOf(event.participant)),
+        ),
+        event.participant,
+      ]);
+    }
+    if (event.type === "left") {
+      setActiveParticipants((current) =>
+        current.filter(
+          (item) => String(idOf(item)) !== String(event.participant?.userId),
+        ),
+      );
+    }
+  };
   if (
     projectList.isLoading ||
     selectedProject.isLoading ||
@@ -359,7 +449,9 @@ export default function CollaborationPage() {
   }
 
   return (
-    <div className="stack collaboration-page">
+    <div
+      className={`stack collaboration-page ${boardId ? "board-workspace" : ""}`}
+    >
       <Link className="back" to="/collaboration">
         <ArrowLeft size={16} /> Back to projects
       </Link>
@@ -372,7 +464,9 @@ export default function CollaborationPage() {
         </p>
       </header>
       <div className="collaboration-grid">
-        <aside className="surface collaboration-sidebar">
+        <aside
+          className={`surface collaboration-sidebar ${inviteOpen ? "open" : ""}`}
+        >
           <div className="section-title">
             <UserPlus size={18} />
             <h2>Invite team members</h2>
@@ -393,11 +487,17 @@ export default function CollaborationPage() {
           <div className="collaboration-member-list">
             {inviteMembers.map((member) => {
               const id = idOf(member);
+              const memberId = String(id);
+              const added = acceptedCollaboratorIds.has(memberId);
+              const invited = pendingCollaboratorIds.has(memberId);
               return (
-                <label key={id}>
+                <label
+                  key={id}
+                  className={`collaboration-member-row ${added ? "is-added" : ""} ${invited ? "is-invited" : ""}`}
+                >
                   <input
                     type="checkbox"
-                    disabled={!canInviteProject}
+                    disabled={!canInviteProject || added || invited}
                     checked={selectedMemberIds.includes(id)}
                     onChange={() =>
                       setSelectedMemberIds((current) =>
@@ -407,7 +507,32 @@ export default function CollaborationPage() {
                       )
                     }
                   />
-                  <span>{memberLabel(member)}</span>
+                  <span>
+                    {memberLabel(member)}
+                    <small className="collaboration-member-status">
+                      {added
+                        ? "Joined collaboration"
+                        : invited
+                          ? "Invitation pending"
+                          : "Available to invite"}
+                    </small>
+                  </span>
+                  {added && (
+                    <button
+                      className="icon tiny-icon danger"
+                      type="button"
+                      title={`Remove ${memberLabel(member)} from collaboration`}
+                      aria-label={`Remove ${memberLabel(member)} from collaboration`}
+                      disabled={removeCollaborator.isPending}
+                      onClick={(event) => {
+                        event.preventDefault();
+                        event.stopPropagation();
+                        removeCollaborator.mutate(id);
+                      }}
+                    >
+                      <UserMinus size={14} />
+                    </button>
+                  )}
                 </label>
               );
             })}
@@ -480,6 +605,53 @@ export default function CollaborationPage() {
                   <h2>{board.data.board.name}</h2>
                 </div>
                 <div className="collaboration-board-actions">
+                  <div
+                    className="collaboration-presence"
+                    title="Active participants"
+                  >
+                    {[user, ...activeParticipants]
+                      .filter(Boolean)
+                      .filter(
+                        (member, index, values) =>
+                          values.findIndex(
+                            (item) =>
+                              String(idOf(item)) === String(idOf(member)),
+                          ) === index,
+                      )
+                      .slice(0, 6)
+                      .map((member) => (
+                        <span className="presence-avatar" key={idOf(member)}>
+                          {member.avatar ? (
+                            <img src={member.avatar} alt={member.name || ""} />
+                          ) : (
+                            (member.name || "?").slice(0, 2).toUpperCase()
+                          )}
+                        </span>
+                      ))}
+                  </div>
+                  <button
+                    className="button secondary collaboration-chat-toggle"
+                    type="button"
+                    onClick={() => setChatOpen((current) => !current)}
+                  >
+                    <MessageCircle size={15} /> Chat
+                  </button>
+                  <button
+                    className="button secondary collaboration-chat-toggle"
+                    type="button"
+                    onClick={() => setInviteOpen((current) => !current)}
+                  >
+                    <UserPlus size={15} /> Invite
+                  </button>
+                  <button
+                    className="icon small-icon"
+                    type="button"
+                    title="Close whiteboard"
+                    aria-label="Close whiteboard"
+                    onClick={() => navigate(`/collaboration/${projectId}`)}
+                  >
+                    <X size={17} />
+                  </button>
                   <span className="badge">
                     {isEditor ? "EDITOR" : "VIEWER"}
                   </span>
@@ -501,21 +673,32 @@ export default function CollaborationPage() {
                     <Trash2 size={16} />
                   </button>
                   {activeSession ? (
-                    <button
-                      className="button secondary"
-                      type="button"
-                      disabled={!board.data.isManager || endSession.isPending}
-                      onClick={() => endSession.mutate(activeSession._id)}
-                    >
-                      <Clock3 size={15} />
-                      End session
-                    </button>
+                    <>
+                      <button
+                        className="button secondary"
+                        type="button"
+                        disabled={leaveSession.isPending}
+                        onClick={() => leaveSession.mutate(activeSession._id)}
+                      >
+                        Leave session
+                      </button>
+                      <button
+                        className="button secondary"
+                        type="button"
+                        disabled={endSession.isPending}
+                        onClick={() => endSession.mutate(activeSession._id)}
+                      >
+                        <Clock3 size={15} /> End session
+                      </button>
+                    </>
                   ) : (
                     <button
                       className="button secondary"
                       type="button"
                       disabled={startSession.isPending}
-                      onClick={() => startSession.mutate()}
+                      onClick={() =>
+                        startSession.mutate({ title: sessionTitle })
+                      }
                     >
                       <Clock3 size={15} />
                       Start session
@@ -527,6 +710,7 @@ export default function CollaborationPage() {
                 boardId={boardId}
                 isEditor={isEditor}
                 snapshot={board.data.board.snapshot}
+                onPresence={updatePresence}
               />
             </>
           ) : (
@@ -537,7 +721,9 @@ export default function CollaborationPage() {
           )}
         </main>
         {boardId && (
-          <aside className="surface collaboration-chat">
+          <aside
+            className={`surface collaboration-chat ${chatOpen ? "open" : ""}`}
+          >
             <div className="section-title">
               <MessageCircle size={18} />
               <h2>Collaboration chat</h2>
@@ -601,15 +787,30 @@ export default function CollaborationPage() {
                     className="collaboration-session"
                     key={idOf(session)}
                   >
-                    <strong>
-                      {new Date(session.startedAt).toLocaleString()}
-                    </strong>
+                    <strong>{session.title || "Collaboration session"}</strong>
                     <small>
                       {session.endedAt
-                        ? `${session.messageCount} messages, ${session.activityCount} activities`
+                        ? `${new Date(session.startedAt).toLocaleDateString()} · ${Math.round((session.durationSeconds || 0) / 60)} min · ${session.participants?.length || 0} participants`
                         : "In progress"}
                     </small>
                     {session.summary && <p>{session.summary}</p>}
+                    <button
+                      className="button text-button"
+                      type="button"
+                      onClick={() => setSelectedSessionId(session._id)}
+                    >
+                      View saved collaboration
+                    </button>
+                    {session.endedAt && (
+                      <button
+                        className="button secondary"
+                        type="button"
+                        disabled={continueSession.isPending}
+                        onClick={() => continueSession.mutate(session)}
+                      >
+                        Continue collaboration
+                      </button>
+                    )}
                   </article>
                 ))
               ) : (
@@ -627,6 +828,90 @@ export default function CollaborationPage() {
           </aside>
         )}
       </div>
+      {selectedSessionId && sessionDetails.data?.session && (
+        <div
+          className="modal-backdrop"
+          onClick={() => setSelectedSessionId(null)}
+        >
+          <section
+            className="modal-card surface collaboration-session-detail"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="modal-header">
+              <div>
+                <small className="eyebrow">COLLABORATION HISTORY</small>
+                <h2>{sessionDetails.data.session.title}</h2>
+              </div>
+              <button
+                className="icon small-icon"
+                type="button"
+                aria-label="Close saved collaboration"
+                onClick={() => setSelectedSessionId(null)}
+              >
+                <X size={17} />
+              </button>
+            </div>
+            <div className="collaboration-session-detail-meta">
+              <span>
+                {new Date(
+                  sessionDetails.data.session.startedAt,
+                ).toLocaleString()}
+              </span>
+              <span>
+                {sessionDetails.data.session.participants?.length || 0}{" "}
+                participants
+              </span>
+              <span>
+                {Math.round(
+                  (sessionDetails.data.session.durationSeconds || 0) / 60,
+                )}{" "}
+                min
+              </span>
+            </div>
+            <div className="collaboration-session-detail-people">
+              {sessionDetails.data.session.participants?.map((participant) => (
+                <span key={idOf(participant)}>
+                  {participant.avatar ? (
+                    <img src={participant.avatar} alt={participant.name} />
+                  ) : (
+                    (participant.name || "?").slice(0, 2).toUpperCase()
+                  )}
+                  {participant.name}
+                </span>
+              ))}
+            </div>
+            <p>
+              {sessionDetails.data.session.summary || "No summary recorded."}
+            </p>
+            <div className="collaboration-session-detail-chat">
+              {sessionDetails.data.messages?.map((message) => (
+                <p key={idOf(message)}>
+                  <strong>{message.sender?.name || "Member"}:</strong>{" "}
+                  {message.text}
+                </p>
+              ))}
+            </div>
+            {sessionDetails.data.session.snapshot && (
+              <BoardCanvas
+                boardId={boardId}
+                isEditor={false}
+                snapshot={sessionDetails.data.session.snapshot}
+              />
+            )}
+            <button
+              className="button primary"
+              type="button"
+              disabled={continueSession.isPending}
+              onClick={() => {
+                continueSession.mutate(sessionDetails.data.session);
+                setSelectedSessionId(null);
+              }}
+            >
+              Start new session from this board
+            </button>
+          </section>
+        </div>
+      )}
     </div>
   );
 }

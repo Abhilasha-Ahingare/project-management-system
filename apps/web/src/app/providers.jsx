@@ -28,7 +28,7 @@ export default function Providers({ children }) {
         {children}
         <ToastContainer
           position="bottom-right"
-          newestOnTop
+          autoClose={4000}
           closeOnClick
           pauseOnHover
           icon={false}

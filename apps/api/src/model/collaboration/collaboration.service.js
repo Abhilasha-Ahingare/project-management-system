@@ -1,5 +1,6 @@
 import ApiError from "../../utils/ApiError.js";
 import Project from "../projects/project.model.js";
+import Team from "../teams/team.model.js";
 import User from "../users/users.model.js";
 import Message from "../chat/chat.model.js";
 import { getAccessibleProject } from "../projects/project-access.service.js";
@@ -9,6 +10,8 @@ import {
   CollaborationSession,
 } from "./collaboration.model.js";
 import { createInvitation } from "../notifications/invitation.service.js";
+import Invitation from "../notifications/invitation.model.js";
+import { generateCollaborationSummary } from "../../utils/collaboration-summary.service.js";
 
 const boardIdOf = (board) => board._id.toString();
 
@@ -34,6 +37,23 @@ const canManageBoard = async (board, userId) => {
   );
 };
 
+const isProjectMember = async (project, userId) => {
+  if (project.owner.toString() === userId) return true;
+  if (
+    (project.members || []).some((member) => member.user.toString() === userId)
+  ) {
+    return true;
+  }
+  if (!project.team) return false;
+  return Boolean(
+    await Team.exists({
+      _id: project.team,
+      isActive: true,
+      $or: [{ lead: userId }, { "members.user": userId }],
+    }),
+  );
+};
+
 export const inviteProjectCollaborators = async (
   projectId,
   emails = [],
@@ -42,27 +62,106 @@ export const inviteProjectCollaborators = async (
   userIds = [],
 ) => {
   const project = await getAccessibleProject(projectId, userId);
-  const selectedUsers = userIds.length
-    ? await User.find({ _id: { $in: userIds }, isActive: true }).select("email")
-    : [];
-  const invitationEmails = [
+  const team = project.team
+    ? await Team.findOne({ _id: project.team, isActive: true }).select(
+        "lead members",
+      )
+    : null;
+  const projectMemberIds = new Set(
+    [
+      project.owner.toString(),
+      ...(project.members || []).map((member) => member.user.toString()),
+      team?.lead?.toString(),
+      ...(team?.members || []).map((member) => member.user.toString()),
+    ].filter(Boolean),
+  );
+  const selectedUsers = await User.find({
+    ...(userIds.length
+      ? { _id: { $in: userIds } }
+      : { email: { $in: emails } }),
+    isActive: true,
+  }).select("name email");
+  const usersByEmail = new Map(
+    selectedUsers.map((selectedUser) => [selectedUser.email, selectedUser]),
+  );
+  const requestedEmails = [
     ...new Set([
-      ...emails,
+      ...emails.map((email) => String(email).trim().toLowerCase()),
       ...selectedUsers.map((selectedUser) => selectedUser.email),
     ]),
   ];
-  return Promise.all(
-    invitationEmails.map((email) =>
-      createInvitation({
-        targetType: "CollaborationProject",
-        targetId: project._id,
-        email,
-        role: permission,
-        invitedBy: userId,
-        targetName: project.name,
-      }),
-    ),
+  const pendingInvitations = await Invitation.find({
+    targetType: "CollaborationProject",
+    targetId: project._id,
+    status: "pending",
+    expiresAt: { $gt: new Date() },
+  }).select("recipient role");
+  const pendingByUser = new Map(
+    pendingInvitations.map((invitation) => [
+      invitation.recipient.toString(),
+      invitation,
+    ]),
   );
+  const acceptedByUser = new Map(
+    (project.collaborators || [])
+      .filter((collaborator) => collaborator.status === "accepted")
+      .map((collaborator) => [collaborator.user.toString(), collaborator]),
+  );
+
+  return Promise.all(
+    requestedEmails.map(async (email) => {
+      const recipient = usersByEmail.get(email);
+      if (!recipient) return { email, status: "unavailable" };
+      if (!projectMemberIds.has(recipient._id.toString())) {
+        return { email, status: "not-project-member" };
+      }
+      if (acceptedByUser.has(recipient._id.toString())) {
+        return { email, user: recipient, status: "joined" };
+      }
+      if (pendingByUser.has(recipient._id.toString())) {
+        return { email, user: recipient, status: "invited" };
+      }
+      try {
+        await createInvitation({
+          targetType: "CollaborationProject",
+          targetId: project._id,
+          email,
+          role: permission,
+          invitedBy: userId,
+          targetName: project.name,
+        });
+        return { email, user: recipient, status: "invited" };
+      } catch (error) {
+        return { email, status: "error", message: error.message };
+      }
+    }),
+  );
+};
+
+export const removeProjectCollaborator = async (
+  projectId,
+  collaboratorId,
+  userId,
+) => {
+  const project = await getAccessibleProject(projectId, userId);
+  const canManage = await isProjectMember(project, userId);
+  if (!canManage)
+    throw new ApiError(403, "Project collaboration access required");
+  if (project.owner.toString() === collaboratorId) {
+    throw new ApiError(
+      400,
+      "Project owner cannot be removed from collaboration",
+    );
+  }
+
+  const collaborator = project.collaborators?.find(
+    (item) => item.user.toString() === collaboratorId,
+  );
+  if (!collaborator) throw new ApiError(404, "Collaboration member not found");
+
+  collaborator.status = "removed";
+  await project.save();
+  return project.populate("collaborators.user", "name email avatar");
 };
 
 export const listBoards = async (projectId, userId) => {
@@ -75,13 +174,12 @@ export const listBoards = async (projectId, userId) => {
 export const createBoard = async (projectId, payload, userId) => {
   const project = await getAccessibleProject(projectId, userId);
   const actor = await User.findById(userId).select("role");
+  const member = await isProjectMember(project, userId);
   const collaborator = project.collaborators?.find(
     (item) => item.user.toString() === userId && item.status === "accepted",
   );
   const canCreate =
-    actor?.role === "admin" ||
-    project.owner.toString() === userId ||
-    collaborator?.permission === "manager";
+    member || actor?.role === "admin" || collaborator?.permission === "manager";
   if (!canCreate)
     throw new ApiError(403, "Only project managers can create whiteboards");
   const board = await CollaborationBoard.create({
@@ -119,11 +217,13 @@ export const getBoardForUser = async (boardId, userId) => {
   const collaborator = project.collaborators?.find(
     (item) => item.user.toString() === userId && item.status === "accepted",
   );
+  const member = await isProjectMember(project, userId);
   const actor = await User.findById(userId).select("role");
   if (
     actor?.role !== "admin" &&
     !participant &&
     !collaborator &&
+    !member &&
     board.createdBy.toString() !== userId
   )
     throw new ApiError(403, "Collaboration access required");
@@ -131,11 +231,13 @@ export const getBoardForUser = async (boardId, userId) => {
     board,
     participant,
     isManager:
+      member ||
       actor?.role === "admin" ||
       board.createdBy.toString() === userId ||
       participant?.permission === "manager" ||
       collaborator?.permission === "manager",
     isEditor:
+      member ||
       actor?.role === "admin" ||
       board.createdBy.toString() === userId ||
       ["manager", "editor"].includes(
@@ -194,8 +296,37 @@ export const getBoardSessions = async (boardId, userId) => {
     .sort({ startedAt: -1 });
 };
 
-export const startBoardSession = async (boardId, userId) => {
+export const getSessionDetails = async (sessionId, userId) => {
+  const session = await CollaborationSession.findById(sessionId).populate(
+    "participants",
+    "name email avatar",
+  );
+  if (!session) throw new ApiError(404, "Collaboration session not found");
+  await getBoardForUser(session.board, userId);
+  const messages = await Message.find({
+    _id: { $in: session.chatMessageIds || [] },
+    isActive: true,
+  })
+    .populate("sender", "name email avatar")
+    .sort({ createdAt: 1 });
+  return { session, messages };
+};
+
+export const startBoardSession = async (boardId, userId, payload = {}) => {
   const { board } = await getBoardForUser(boardId, userId);
+  if (payload.sourceSessionId) {
+    const source = await CollaborationSession.findOne({
+      _id: payload.sourceSessionId,
+      board: board._id,
+    });
+    if (!source)
+      throw new ApiError(404, "Source collaboration session not found");
+    if (source.snapshot) {
+      board.snapshot = source.snapshot;
+      board.snapshotVersion += 1;
+      await board.save();
+    }
+  }
   const activeSession = await CollaborationSession.findOne({
     board: board._id,
     endedAt: null,
@@ -211,6 +342,7 @@ export const startBoardSession = async (boardId, userId) => {
     board: board._id,
     project: board.project,
     startedAt: new Date(),
+    title: payload.title?.trim() || "Collaboration session",
     participants: [userId],
   });
   await CollaborationActivity.create({
@@ -221,6 +353,16 @@ export const startBoardSession = async (boardId, userId) => {
     payload: { sessionId: session._id },
   });
   return session;
+};
+
+export const continueBoardSession = async (sessionId, userId, payload = {}) => {
+  const source = await CollaborationSession.findById(sessionId);
+  if (!source) throw new ApiError(404, "Collaboration session not found");
+  await getBoardForUser(source.board, userId);
+  return startBoardSession(source.board, userId, {
+    title: payload.title || `Continuation of ${source.title}`,
+    sourceSessionId: source._id,
+  });
 };
 
 export const endBoardSession = async (sessionId, userId) => {
@@ -234,30 +376,66 @@ export const endBoardSession = async (sessionId, userId) => {
     );
   if (session.endedAt) return session;
 
-  const [messageCount, activityCount] = await Promise.all([
-    Message.countDocuments({
+  const endedAt = new Date();
+  const [messages, activityCount] = await Promise.all([
+    Message.find({
       scopeType: "CollaborationBoard",
       scopeId: board._id,
       isActive: true,
-      createdAt: { $gte: session.startedAt },
-    }),
+      createdAt: { $gte: session.startedAt, $lte: endedAt },
+    })
+      .populate("sender", "name")
+      .select("_id text sender"),
     CollaborationActivity.countDocuments({
       board: board._id,
       createdAt: { $gte: session.startedAt },
     }),
   ]);
-  session.endedAt = new Date();
-  session.messageCount = messageCount;
+  session.endedAt = endedAt;
+  session.durationSeconds = Math.max(
+    0,
+    Math.floor((endedAt.getTime() - session.startedAt.getTime()) / 1000),
+  );
+  session.snapshot = board.snapshot;
+  session.chatMessageIds = messages.map((message) => message._id);
+  session.messageCount = messages.length;
   session.activityCount = activityCount;
-  session.summary = `${session.participants.length} participant(s), ${activityCount} recorded board activities, and ${messageCount} chat message(s).`;
+  const generatedSummary = await generateCollaborationSummary({
+    title: session.title,
+    participantsCount: session.participants.length,
+    activityCount,
+    messages,
+  });
+  session.summary = generatedSummary.summary;
+  session.summaryType = generatedSummary.summaryType;
   await session.save();
   await CollaborationActivity.create({
     board: board._id,
     project: board.project,
     actor: userId,
     type: "session.ended",
-    payload: { sessionId: session._id, messageCount, activityCount },
+    payload: {
+      sessionId: session._id,
+      messageCount: messages.length,
+      activityCount,
+      summaryType: generatedSummary.summaryType,
+    },
   });
+  return session;
+};
+
+export const leaveBoardSession = async (sessionId, userId) => {
+  const session = await CollaborationSession.findOne({
+    _id: sessionId,
+    endedAt: null,
+  });
+  if (!session)
+    throw new ApiError(404, "Active collaboration session not found");
+  await getBoardForUser(session.board, userId);
+  session.participants = session.participants.filter(
+    (participant) => participant.toString() !== userId,
+  );
+  await session.save();
   return session;
 };
 

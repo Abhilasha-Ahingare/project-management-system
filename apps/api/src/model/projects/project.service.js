@@ -8,6 +8,7 @@ import {
   logProjectUpdated,
 } from "../activities/activity.service.js";
 import { createInvitation } from "../notifications/invitation.service.js";
+import Invitation from "../notifications/invitation.model.js";
 import { hasAccessibleProject } from "./project-access.service.js";
 
 const slugify = (value) => {
@@ -150,7 +151,24 @@ export const getProjectById = async (projectId, userId) => {
     throw new ApiError(403, "You do not have access to this project");
   }
 
-  return project;
+  const pendingCollaborators = await Invitation.find({
+    targetType: "CollaborationProject",
+    targetId: project._id,
+    status: "pending",
+    expiresAt: { $gt: new Date() },
+  }).populate("recipient", "name email avatar");
+
+  return {
+    ...project.toObject(),
+    pendingCollaborators: pendingCollaborators.map((invitation) => ({
+      _id: invitation.recipient?._id,
+      name: invitation.recipient?.name,
+      email: invitation.recipient?.email,
+      avatar: invitation.recipient?.avatar,
+      status: "pending",
+      permission: invitation.role,
+    })),
+  };
 };
 
 export const updateProject = async (projectId, payload, userId) => {

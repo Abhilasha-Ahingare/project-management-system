@@ -17,8 +17,12 @@ import {
   endBoardSession,
   getBoardSnapshot,
   inviteProjectCollaborators,
+  removeProjectCollaborator,
   deleteBoard,
   clearBoardSessions,
+  continueBoardSession,
+  getSessionDetails,
+  leaveBoardSession,
 } from "./collaboration.service.js";
 
 const router = express.Router();
@@ -39,6 +43,14 @@ const inviteSchema = Joi.object({
   return value;
 }, "at least one collaborator");
 const snapshotSchema = Joi.object({ snapshot: Joi.object().required() });
+const sessionSchema = Joi.object({
+  title: Joi.string()
+    .trim()
+    .max(160)
+    .allow("")
+    .default("Collaboration session"),
+  sourceSessionId: Joi.string().hex().length(24).allow(null),
+});
 
 router.use(authMiddleware);
 router.get(
@@ -77,7 +89,32 @@ router.post(
       req.user.id,
       req.body.userIds || [],
     );
-    res.status(201).json(new ApiResponse(201, invitations, "Collaboration invitations sent successfully"));
+    res
+      .status(201)
+      .json(
+        new ApiResponse(
+          201,
+          invitations,
+          "Collaboration invitations sent successfully",
+        ),
+      );
+  }),
+);
+router.delete(
+  "/projects/:projectId/collaboration/members/:userId",
+  asyncHandler(async (req, res) => {
+    const project = await removeProjectCollaborator(
+      req.params.projectId,
+      req.params.userId,
+      req.user.id,
+    );
+    res.json(
+      new ApiResponse(
+        200,
+        project,
+        "Collaboration member removed successfully",
+      ),
+    );
   }),
 );
 router.get(
@@ -93,7 +130,9 @@ router.delete(
   "/collaboration/boards/:boardId",
   asyncHandler(async (req, res) => {
     const result = await deleteBoard(req.params.boardId, req.user.id);
-    res.json(new ApiResponse(200, result, "Collaboration board deleted successfully"));
+    res.json(
+      new ApiResponse(200, result, "Collaboration board deleted successfully"),
+    );
   }),
 );
 router.post(
@@ -170,10 +209,28 @@ router.get(
     );
   }),
 );
+router.get(
+  "/collaboration/sessions/:sessionId",
+  asyncHandler(async (req, res) => {
+    const details = await getSessionDetails(req.params.sessionId, req.user.id);
+    res.json(
+      new ApiResponse(
+        200,
+        details,
+        "Collaboration session details fetched successfully",
+      ),
+    );
+  }),
+);
 router.post(
   "/collaboration/boards/:boardId/sessions",
+  validate(sessionSchema),
   asyncHandler(async (req, res) => {
-    const session = await startBoardSession(req.params.boardId, req.user.id);
+    const session = await startBoardSession(
+      req.params.boardId,
+      req.user.id,
+      req.body,
+    );
     res
       .status(201)
       .json(
@@ -182,6 +239,21 @@ router.post(
           session,
           "Collaboration session started successfully",
         ),
+      );
+  }),
+);
+router.post(
+  "/collaboration/sessions/:sessionId/continue",
+  asyncHandler(async (req, res) => {
+    const session = await continueBoardSession(
+      req.params.sessionId,
+      req.user.id,
+      req.body || {},
+    );
+    res
+      .status(201)
+      .json(
+        new ApiResponse(201, session, "Collaboration continued successfully"),
       );
   }),
 );
@@ -195,10 +267,25 @@ router.patch(
   }),
 );
 router.delete(
+  "/collaboration/sessions/:sessionId/participants/me",
+  asyncHandler(async (req, res) => {
+    const session = await leaveBoardSession(req.params.sessionId, req.user.id);
+    res.json(
+      new ApiResponse(200, session, "You left the collaboration session"),
+    );
+  }),
+);
+router.delete(
   "/collaboration/boards/:boardId/sessions",
   asyncHandler(async (req, res) => {
     const result = await clearBoardSessions(req.params.boardId, req.user.id);
-    res.json(new ApiResponse(200, result, "Collaboration session history cleared successfully"));
+    res.json(
+      new ApiResponse(
+        200,
+        result,
+        "Collaboration session history cleared successfully",
+      ),
+    );
   }),
 );
 

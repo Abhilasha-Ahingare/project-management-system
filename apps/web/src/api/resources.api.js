@@ -83,6 +83,8 @@ export const collaboration = {
     write("post", `/projects/${projectId}/collaboration/boards`, data),
   inviteProject: (projectId, data) =>
     write("post", `/projects/${projectId}/collaboration/invitations`, data),
+  removeProjectMember: (projectId, userId) =>
+    write("delete", `/projects/${projectId}/collaboration/members/${userId}`),
   detail: (boardId) => get(`/collaboration/boards/${boardId}`),
   invite: (boardId, data) =>
     write("post", `/collaboration/boards/${boardId}/invitations`, data),
@@ -91,10 +93,15 @@ export const collaboration = {
     write("post", `/collaboration/boards/${boardId}/snapshot`, { snapshot }),
   history: (boardId) => get(`/collaboration/boards/${boardId}/history`),
   sessions: (boardId) => get(`/collaboration/boards/${boardId}/sessions`),
-  startSession: (boardId) =>
-    write("post", `/collaboration/boards/${boardId}/sessions`),
+  sessionDetails: (sessionId) => get(`/collaboration/sessions/${sessionId}`),
+  startSession: (boardId, data) =>
+    write("post", `/collaboration/boards/${boardId}/sessions`, data),
+  continueSession: (sessionId, data) =>
+    write("post", `/collaboration/sessions/${sessionId}/continue`, data),
   endSession: (sessionId) =>
     write("patch", `/collaboration/sessions/${sessionId}/end`),
+  leaveSession: (sessionId) =>
+    write("delete", `/collaboration/sessions/${sessionId}/participants/me`),
   removeBoard: (boardId) => write("delete", `/collaboration/boards/${boardId}`),
   clearSessions: (boardId) =>
     write("delete", `/collaboration/boards/${boardId}/sessions`),

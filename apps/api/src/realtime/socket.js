@@ -5,6 +5,7 @@ import env from "../config/env.js";
 import Project from "../model/projects/project.model.js";
 import Team from "../model/teams/team.model.js";
 import Task from "../model/tasks/task.model.js";
+import User from "../model/users/users.model.js";
 import {
   CollaborationActivity,
   CollaborationBoard,
@@ -114,6 +115,18 @@ export const initializeRealtime = (httpServer) => {
       try {
         await getBoardForUser(boardId, socket.user.id);
         socket.join(collaborationRoom(boardId));
+        const participant = await User.findById(socket.user.id).select(
+          "_id name avatar",
+        );
+        socket
+          .to(collaborationRoom(boardId))
+          .emit("collaboration_participant_joined", participant);
+        const sockets = await io.in(collaborationRoom(boardId)).fetchSockets();
+        const ids = sockets.map((roomSocket) => roomSocket.user.id);
+        const participants = await User.find({ _id: { $in: ids } }).select(
+          "_id name avatar",
+        );
+        socket.emit("collaboration_participants", participants);
         acknowledge?.({ success: true, room: collaborationRoom(boardId) });
       } catch (error) {
         acknowledge?.({ success: false, message: error.message });
@@ -121,7 +134,12 @@ export const initializeRealtime = (httpServer) => {
     });
 
     socket.on("leave_collaboration_board", (boardId) =>
-      socket.leave(collaborationRoom(boardId)),
+      (() => {
+        socket
+          .to(collaborationRoom(boardId))
+          .emit("collaboration_participant_left", { userId: socket.user.id });
+        socket.leave(collaborationRoom(boardId));
+      })(),
     );
 
     socket.on("collaboration_board_update", async (payload, acknowledge) => {
