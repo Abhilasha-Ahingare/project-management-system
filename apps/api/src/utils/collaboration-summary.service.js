@@ -56,3 +56,44 @@ Return a concise summary in 3 to 5 bullet points. Mention decisions, discussed w
     return { summary: fallback, summaryType: "deterministic" };
   }
 };
+
+export const askCollaborationAI = async ({
+  question,
+  boardName,
+  messages,
+  activities,
+}) => {
+  if (!client) {
+    return "AI assistant is not configured. Add OPENAI_API_KEY to apps/api/src/.env.";
+  }
+  const transcript = messages.length
+    ? messages
+        .slice(-80)
+        .map(
+          (message) => `${message.sender?.name || "Member"}: ${message.text}`,
+        )
+        .join("\n")
+    : "No chat messages yet.";
+  const activityLog = activities.length
+    ? activities
+        .slice(-80)
+        .map(
+          (activity) => `${activity.actor?.name || "Member"}: ${activity.type}`,
+        )
+        .join("\n")
+    : "No board activity recorded yet.";
+  const response = await client.responses.create({
+    model: env.openaiModel,
+    input: `You are the ProjectHub collaboration assistant. Answer the user's question using only this board context. Be concise and practical. If the context does not contain the answer, say so.
+
+Board: ${boardName}
+User question: ${question}
+
+Chat:
+${transcript}
+
+Board activity:
+${activityLog}`,
+  });
+  return response.output_text?.trim() || "I could not generate an answer.";
+};

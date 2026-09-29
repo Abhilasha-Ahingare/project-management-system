@@ -160,7 +160,7 @@ export const initializeRealtime = (httpServer) => {
             $set: { snapshot, updatedAt: new Date() },
             $inc: { snapshotVersion: 1 },
           },
-          { new: true, select: "snapshotVersion" },
+          { returnDocument: "after", select: "snapshotVersion" },
         );
         const update = {
           boardId: board._id.toString(),

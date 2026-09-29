@@ -23,6 +23,7 @@ import {
   continueBoardSession,
   getSessionDetails,
   leaveBoardSession,
+  askBoardAI,
 } from "./collaboration.service.js";
 
 const router = express.Router();
@@ -193,6 +194,22 @@ router.get(
         history,
         "Collaboration history fetched successfully",
       ),
+    );
+  }),
+);
+router.post(
+  "/collaboration/boards/:boardId/ai",
+  validate(
+    Joi.object({ question: Joi.string().trim().min(2).max(2000).required() }),
+  ),
+  asyncHandler(async (req, res) => {
+    const answer = await askBoardAI(
+      req.params.boardId,
+      req.body.question,
+      req.user.id,
+    );
+    res.json(
+      new ApiResponse(200, { answer }, "Collaboration AI response generated"),
     );
   }),
 );

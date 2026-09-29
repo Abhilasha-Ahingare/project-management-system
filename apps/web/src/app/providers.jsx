@@ -1,7 +1,7 @@
 import { useEffect } from "react";
 import { Provider, useDispatch } from "react-redux";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { ToastContainer } from "react-toastify";
+import { Slide, ToastContainer } from "react-toastify";
 import { store, clear } from "./store";
 import { setUnauthorizedHandler } from "../api/client";
 import "react-toastify/dist/ReactToastify.css";
@@ -30,7 +30,11 @@ export default function Providers({ children }) {
           position="bottom-right"
           autoClose={4000}
           closeOnClick
-          pauseOnHover
+          pauseOnHover={false}
+          pauseOnFocusLoss={false}
+          draggable
+          transition={Slide}
+          hideProgressBar={false}
           icon={false}
           toastClassName="projecthub-toast"
           bodyClassName="projecthub-toast-body"

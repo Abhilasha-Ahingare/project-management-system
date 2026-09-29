@@ -13,6 +13,7 @@ import {
   Plus,
   RotateCcw,
   Send,
+  Sparkles,
   Trash2,
   UserPlus,
   UserMinus,
@@ -38,18 +39,34 @@ const memberLabel = (member) => {
     ? `Team member ${String(identifier).slice(-6)}`
     : "Team member";
 };
+const memberInitial = (member) =>
+  (member?.name || member?.email || "?").trim().slice(0, 1).toUpperCase();
+
+const normalizeAppState = (appState) => {
+  if (!appState) return undefined;
+  const normalized = { ...appState };
+  if (normalized.collaborators && !(normalized.collaborators instanceof Map)) {
+    normalized.collaborators = new Map(
+      Array.isArray(normalized.collaborators)
+        ? normalized.collaborators
+        : Object.entries(normalized.collaborators),
+    );
+  }
+  return normalized;
+};
 
 function BoardCanvas({ boardId, isEditor, snapshot, onPresence }) {
   const token = localStorage.getItem("projecthub_access_token");
   const apiRef = useRef(null);
   const socketRef = useRef(null);
   const saveTimer = useRef(null);
+  const pendingSnapshot = useRef(null);
   const presenceRef = useRef(onPresence);
   presenceRef.current = onPresence;
   const initialData = snapshot?.elements
     ? {
         elements: snapshot.elements,
-        appState: snapshot.appState || undefined,
+        appState: normalizeAppState(snapshot.appState),
         files: snapshot.files || {},
       }
     : undefined;
@@ -66,7 +83,7 @@ function BoardCanvas({ boardId, isEditor, snapshot, onPresence }) {
       if (!remote?.elements) return;
       apiRef.current.updateScene({
         elements: remote.elements,
-        appState: remote.appState,
+        appState: normalizeAppState(remote.appState),
       });
       if (remote.files) apiRef.current.addFiles(Object.values(remote.files));
     };
@@ -82,6 +99,12 @@ function BoardCanvas({ boardId, isEditor, snapshot, onPresence }) {
     );
     return () => {
       if (saveTimer.current) window.clearTimeout(saveTimer.current);
+      if (pendingSnapshot.current && socketRef.current) {
+        socketRef.current.emit("collaboration_board_update", {
+          boardId,
+          snapshot: pendingSnapshot.current,
+        });
+      }
       socket.emit("leave_collaboration_board", boardId);
       socket.off("collaboration_board_updated", applyRemoteUpdate);
       socket.off("collaboration_participant_joined", joined);
@@ -94,12 +117,14 @@ function BoardCanvas({ boardId, isEditor, snapshot, onPresence }) {
 
   const handleChange = (elements, appState, files) => {
     if (!isEditor || !token) return;
+    pendingSnapshot.current = { elements, appState, files };
     if (saveTimer.current) window.clearTimeout(saveTimer.current);
     saveTimer.current = window.setTimeout(() => {
       socketRef.current?.emit("collaboration_board_update", {
         boardId,
-        snapshot: { elements, appState, files },
+        snapshot: pendingSnapshot.current,
       });
+      pendingSnapshot.current = null;
     }, 350);
   };
 
@@ -124,9 +149,11 @@ export default function CollaborationPage() {
   const qc = useQueryClient();
   const [boardName, setBoardName] = useState("");
   const [chatText, setChatText] = useState("");
+  const [aiPrompt, setAiPrompt] = useState("");
+  const [aiAnswer, setAiAnswer] = useState("");
   const [selectedMemberIds, setSelectedMemberIds] = useState([]);
   const [invitePermission, setInvitePermission] = useState("editor");
-  const [chatOpen, setChatOpen] = useState(false);
+  const [drawerMode, setDrawerMode] = useState(null);
   const [inviteOpen, setInviteOpen] = useState(false);
   const [sessionTitle, setSessionTitle] = useState("Collaboration session");
   const [activeParticipants, setActiveParticipants] = useState([]);
@@ -261,6 +288,19 @@ export default function CollaborationPage() {
     onError: (error) =>
       toast.error(apiMessage(error, "Unable to send collaboration message")),
   });
+  const askAI = useMutation({
+    mutationFn: () => collaboration.askAI(boardId, aiPrompt.trim()),
+    onSuccess: (result) => {
+      setAiAnswer(result.answer || "No answer returned.");
+      setAiPrompt("");
+    },
+    onError: (error) => toast.error(apiMessage(error, "Unable to ask AI")),
+  });
+  const closeDrawer = () => {
+    setDrawerMode(null);
+    setAiPrompt("");
+    setAiAnswer("");
+  };
   const startSession = useMutation({
     mutationFn: (data) => collaboration.startSession(boardId, data),
     onSuccess: () => {
@@ -389,6 +429,27 @@ export default function CollaborationPage() {
       );
     }
   };
+  const collaborationPeople = [
+    user,
+    ...(board.data?.board?.participants || [])
+      .filter((participant) => participant.status !== "removed")
+      .map((participant) => participant.user),
+    ...members.filter((member) =>
+      selectedProject.data?.collaborators?.some(
+        (collaborator) =>
+          String(idOf(collaborator.user)) === String(idOf(member)) &&
+          collaborator.status === "accepted",
+      ),
+    ),
+    ...activeParticipants,
+  ]
+    .filter(Boolean)
+    .filter(
+      (member, index, values) =>
+        values.findIndex(
+          (item) => String(idOf(item)) === String(idOf(member)),
+        ) === index,
+    );
   if (
     projectList.isLoading ||
     selectedProject.isLoading ||
@@ -624,17 +685,37 @@ export default function CollaborationPage() {
                           {member.avatar ? (
                             <img src={member.avatar} alt={member.name || ""} />
                           ) : (
-                            (member.name || "?").slice(0, 2).toUpperCase()
+                            memberInitial(member)
                           )}
                         </span>
                       ))}
                   </div>
                   <button
-                    className="button secondary collaboration-chat-toggle"
+                    className="icon small-icon collaboration-drawer-toggle"
                     type="button"
-                    onClick={() => setChatOpen((current) => !current)}
+                    title="Open collaboration chat"
+                    aria-label="Open collaboration chat"
+                    onClick={() => setDrawerMode("chat")}
                   >
-                    <MessageCircle size={15} /> Chat
+                    <MessageCircle size={16} />
+                  </button>
+                  <button
+                    className="icon small-icon collaboration-drawer-toggle"
+                    type="button"
+                    title="Open AI assistant"
+                    aria-label="Open AI assistant"
+                    onClick={() => setDrawerMode("ai")}
+                  >
+                    <Sparkles size={16} />
+                  </button>
+                  <button
+                    className="icon small-icon collaboration-drawer-toggle"
+                    type="button"
+                    title="Open session history"
+                    aria-label="Open session history"
+                    onClick={() => setDrawerMode("history")}
+                  >
+                    <History size={16} />
                   </button>
                   <button
                     className="button secondary collaboration-chat-toggle"
@@ -722,109 +803,199 @@ export default function CollaborationPage() {
         </main>
         {boardId && (
           <aside
-            className={`surface collaboration-chat ${chatOpen ? "open" : ""}`}
+            className={`surface collaboration-chat ${drawerMode ? "open" : ""} ${drawerMode === "ai" ? "ai-mode" : ""}`}
           >
-            <div className="section-title">
-              <MessageCircle size={18} />
-              <h2>Collaboration chat</h2>
-            </div>
-            <div className="collaboration-chat-thread">
-              {messageData.map((message) => (
-                <div className="collaboration-chat-message" key={idOf(message)}>
-                  <strong>{message.sender?.name || "Member"}</strong>
-                  <p>{message.text}</p>
-                  <small>
-                    {new Date(message.createdAt).toLocaleTimeString([], {
-                      hour: "2-digit",
-                      minute: "2-digit",
-                    })}
-                  </small>
+            <div className="collaboration-chat-header">
+              <div className="section-title">
+                {drawerMode === "ai" ? (
+                  <Sparkles size={18} />
+                ) : drawerMode === "history" ? (
+                  <History size={18} />
+                ) : (
+                  <MessageCircle size={18} />
+                )}
+                <div>
+                  <h2>
+                    {drawerMode === "ai"
+                      ? "ProjectHub AI"
+                      : drawerMode === "history"
+                        ? "Session history"
+                        : "Collaboration chat"}
+                  </h2>
+                  {drawerMode === "chat" && (
+                    <div className="collaboration-chat-participants">
+                      {collaborationPeople.map((member) => (
+                        <span
+                          className="collaboration-chat-person"
+                          key={idOf(member)}
+                          title={member.name || "Participant"}
+                        >
+                          <span className="chat-avatar">
+                            {member.avatar ? (
+                              <img
+                                src={member.avatar}
+                                alt={member.name || ""}
+                              />
+                            ) : (
+                              memberInitial(member)
+                            )}
+                          </span>
+                          <small>{member.name || "Member"}</small>
+                        </span>
+                      ))}
+                    </div>
+                  )}
                 </div>
-              ))}
-            </div>
-            <div className="composer">
-              <input
-                placeholder="Discuss this board..."
-                value={chatText}
-                onChange={(event) => setChatText(event.target.value)}
-                onKeyDown={(event) => {
-                  if (event.key === "Enter") sendMessage.mutate();
-                }}
-              />
+              </div>
               <button
-                className="icon send"
-                disabled={!chatText.trim() || sendMessage.isPending}
-                onClick={() => sendMessage.mutate()}
+                className="icon small-icon"
+                type="button"
+                title="Close collaboration chat"
+                aria-label="Close collaboration chat"
+                onClick={closeDrawer}
               >
-                <Send size={16} />
+                <X size={16} />
               </button>
             </div>
-            <div className="collaboration-history">
-              <div className="collaboration-history-header">
-                <div className="section-title">
-                  <History size={17} />
-                  <h2>Session history</h2>
-                </div>
-                <button
-                  className="button text-button"
-                  type="button"
-                  disabled={
-                    !sessionData.length ||
-                    !board.data.isManager ||
-                    clearSessions.isPending
-                  }
-                  onClick={() => {
-                    if (window.confirm("Clear all saved session summaries?"))
-                      clearSessions.mutate();
-                  }}
-                >
-                  <RotateCcw size={14} /> Clear all
-                </button>
-              </div>
-              {sessionData.length ? (
-                sessionData.map((session) => (
-                  <article
-                    className="collaboration-session"
-                    key={idOf(session)}
+            {drawerMode === "ai" && (
+              <div className="collaboration-ai">
+                <p className="muted small-note">
+                  Ask questions about this board's saved chat and activity.
+                </p>
+                {aiAnswer && (
+                  <p className="collaboration-ai-answer">{aiAnswer}</p>
+                )}
+                <div className="collaboration-ai-form">
+                  <input
+                    type="text"
+                    placeholder="What has been completed?"
+                    value={aiPrompt}
+                    onChange={(event) => setAiPrompt(event.target.value)}
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter" && aiPrompt.trim())
+                        askAI.mutate();
+                    }}
+                  />
+                  <button
+                    className="icon send"
+                    type="button"
+                    disabled={!aiPrompt.trim() || askAI.isPending}
+                    onClick={() => askAI.mutate()}
+                    aria-label="Ask AI"
                   >
-                    <strong>{session.title || "Collaboration session"}</strong>
-                    <small>
-                      {session.endedAt
-                        ? `${new Date(session.startedAt).toLocaleDateString()} · ${Math.round((session.durationSeconds || 0) / 60)} min · ${session.participants?.length || 0} participants`
-                        : "In progress"}
-                    </small>
-                    {session.summary && <p>{session.summary}</p>}
-                    <button
-                      className="button text-button"
-                      type="button"
-                      onClick={() => setSelectedSessionId(session._id)}
+                    <Send size={16} />
+                  </button>
+                </div>
+              </div>
+            )}
+            {drawerMode === "chat" && (
+              <>
+                <div className="collaboration-chat-thread">
+                  {messageData.map((message) => (
+                    <div
+                      className="collaboration-chat-message"
+                      key={idOf(message)}
                     >
-                      View saved collaboration
-                    </button>
-                    {session.endedAt && (
+                      <strong>{message.sender?.name || "Member"}</strong>
+                      <p>{message.text}</p>
+                      <small>
+                        {new Date(message.createdAt).toLocaleTimeString([], {
+                          hour: "2-digit",
+                          minute: "2-digit",
+                        })}
+                      </small>
+                    </div>
+                  ))}
+                </div>
+                <div className="composer">
+                  <input
+                    placeholder="Discuss this board..."
+                    value={chatText}
+                    onChange={(event) => setChatText(event.target.value)}
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter") sendMessage.mutate();
+                    }}
+                  />
+                  <button
+                    className="icon send"
+                    disabled={!chatText.trim() || sendMessage.isPending}
+                    onClick={() => sendMessage.mutate()}
+                  >
+                    <Send size={16} />
+                  </button>
+                </div>
+              </>
+            )}
+            {drawerMode === "history" && (
+              <div className="collaboration-history collaboration-history-drawer">
+                <div className="collaboration-history-header">
+                  <div className="section-title">
+                    <History size={17} />
+                    <h2>Session history</h2>
+                  </div>
+                  <button
+                    className="button text-button"
+                    type="button"
+                    disabled={
+                      !sessionData.length ||
+                      !board.data.isManager ||
+                      clearSessions.isPending
+                    }
+                    onClick={() => {
+                      if (window.confirm("Clear all saved session summaries?"))
+                        clearSessions.mutate();
+                    }}
+                  >
+                    <RotateCcw size={14} /> Clear all
+                  </button>
+                </div>
+                {sessionData.length ? (
+                  sessionData.map((session) => (
+                    <article
+                      className="collaboration-session"
+                      key={idOf(session)}
+                    >
+                      <strong>
+                        {session.title || "Collaboration session"}
+                      </strong>
+                      <small>
+                        {session.endedAt
+                          ? `${new Date(session.startedAt).toLocaleDateString()} · ${Math.round((session.durationSeconds || 0) / 60)} min · ${session.participants?.length || 0} participants`
+                          : "In progress"}
+                      </small>
+                      {session.summary && <p>{session.summary}</p>}
                       <button
-                        className="button secondary"
+                        className="button text-button"
                         type="button"
-                        disabled={continueSession.isPending}
-                        onClick={() => continueSession.mutate(session)}
+                        onClick={() => setSelectedSessionId(session._id)}
                       >
-                        Continue collaboration
+                        View saved collaboration
                       </button>
-                    )}
-                  </article>
-                ))
-              ) : (
-                <span className="muted small-note">
-                  No sessions recorded yet.
-                </span>
-              )}
-              {historyData.length > 0 && (
-                <small className="muted">
-                  Latest activity:{" "}
-                  {new Date(historyData[0].createdAt).toLocaleString()}
-                </small>
-              )}
-            </div>
+                      {session.endedAt && (
+                        <button
+                          className="button secondary"
+                          type="button"
+                          disabled={continueSession.isPending}
+                          onClick={() => continueSession.mutate(session)}
+                        >
+                          Continue collaboration
+                        </button>
+                      )}
+                    </article>
+                  ))
+                ) : (
+                  <span className="muted small-note">
+                    No sessions recorded yet.
+                  </span>
+                )}
+                {historyData.length > 0 && (
+                  <small className="muted">
+                    Latest activity:{" "}
+                    {new Date(historyData[0].createdAt).toLocaleString()}
+                  </small>
+                )}
+              </div>
+            )}
           </aside>
         )}
       </div>

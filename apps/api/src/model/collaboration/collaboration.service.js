@@ -11,7 +11,10 @@ import {
 } from "./collaboration.model.js";
 import { createInvitation } from "../notifications/invitation.service.js";
 import Invitation from "../notifications/invitation.model.js";
-import { generateCollaborationSummary } from "../../utils/collaboration-summary.service.js";
+import {
+  askCollaborationAI,
+  generateCollaborationSummary,
+} from "../../utils/collaboration-summary.service.js";
 
 const boardIdOf = (board) => board._id.toString();
 
@@ -227,8 +230,12 @@ export const getBoardForUser = async (boardId, userId) => {
     board.createdBy.toString() !== userId
   )
     throw new ApiError(403, "Collaboration access required");
+  const populatedBoard = await board.populate([
+    { path: "createdBy", select: "name email avatar" },
+    { path: "participants.user", select: "name email avatar" },
+  ]);
   return {
-    board,
+    board: populatedBoard,
     participant,
     isManager:
       member ||
@@ -287,6 +294,47 @@ export const listBoardHistory = async (boardId, userId) => {
     .populate("actor", "name email")
     .sort({ createdAt: -1 })
     .limit(300);
+};
+
+export const askBoardAI = async (boardId, question, userId) => {
+  const { board } = await getBoardForUser(boardId, userId);
+  const [messages, activities] = await Promise.all([
+    Message.find({
+      scopeType: "CollaborationBoard",
+      scopeId: board._id,
+      isActive: true,
+    })
+      .populate("sender", "name")
+      .sort({ createdAt: 1 })
+      .limit(200),
+    CollaborationActivity.find({ board: board._id })
+      .populate("actor", "name")
+      .sort({ createdAt: 1 })
+      .limit(200),
+  ]);
+  try {
+    return await askCollaborationAI({
+      question,
+      boardName: board.name,
+      messages,
+      activities,
+    });
+  } catch (error) {
+    console.error("[ProjectHub AI] board assistant request failed", {
+      status: error.status,
+      code: error.code,
+      message: error.message,
+    });
+    const message =
+      error.status === 401
+        ? "OpenAI rejected the configured API key. Check OPENAI_API_KEY in apps/api/src/.env and restart the API."
+        : error.status === 429
+          ? "OpenAI rate limit or account quota reached. Check the OpenAI billing and usage limits."
+          : error.status === 403
+            ? "The configured OpenAI account cannot access this model. Check OPENAI_MODEL and model access."
+            : "OpenAI could not answer this request. Check the API server logs for details.";
+    throw new ApiError(502, message);
+  }
 };
 
 export const getBoardSessions = async (boardId, userId) => {

@@ -108,6 +108,8 @@ export const collaboration = {
   chat: (boardId) => get(`/chat/CollaborationBoard/${boardId}`),
   sendChat: (boardId, data) =>
     write("post", `/chat/CollaborationBoard/${boardId}`, data),
+  askAI: (boardId, question) =>
+    write("post", `/collaboration/boards/${boardId}/ai`, { question }),
 };
 export const activities = { mine: () => get("/activities/me/feed") };
 export const files = {

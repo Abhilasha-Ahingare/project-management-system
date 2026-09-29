@@ -216,7 +216,6 @@
   color: var(--ink);
   background: #fff;
   box-shadow: 0 18px 42px rgba(23, 33, 43, 0.2);
-  animation: projecthub-toast-in 360ms cubic-bezier(0.2, 0.8, 0.2, 1);
 }
 .projecthub-toast-body {
   display: flex;
@@ -231,16 +230,6 @@
 .projecthub-toast .Toastify__close-button {
   align-self: center;
   color: var(--muted);
-}
-@keyframes projecthub-toast-in {
-  from {
-    opacity: 0;
-    transform: translate3d(24px, 16px, 0) scale(0.96);
-  }
-  to {
-    opacity: 1;
-    transform: translate3d(0, 0, 0) scale(1);
-  }
 }
 .live-notification-card {
   position: fixed;
@@ -1289,6 +1278,55 @@ p {
   color: var(--muted);
   font-size: 10px;
 }
+.collaboration-ai {
+  display: grid;
+  gap: 7px;
+  padding-bottom: 4px;
+  border-bottom: 1px solid var(--line);
+}
+.collaboration-ai-form {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 34px;
+  gap: 7px;
+}
+.collaboration-ai-form input {
+  min-width: 0;
+  width: 100%;
+  height: 42px;
+  min-height: 42px;
+  align-self: end;
+  padding: 0 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  outline: 0;
+  background: #fff;
+}
+.collaboration-ai-form input:focus {
+  border-color: var(--teal);
+  box-shadow: 0 0 0 3px #0e817822;
+}
+.collaboration-chat.ai-mode {
+  grid-template-rows: auto minmax(0, 1fr);
+}
+.collaboration-chat.ai-mode .collaboration-ai {
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.collaboration-chat.ai-mode .collaboration-ai-form {
+  margin-top: auto;
+}
+.collaboration-ai-answer {
+  margin: 0;
+  padding: 9px 10px;
+  border-radius: 8px;
+  color: var(--ink);
+  background: #eef9f7;
+  font-size: 12px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+}
 .collaboration-chat .composer {
   display: grid;
   grid-template-columns: minmax(0, 1fr) 34px;
@@ -1402,6 +1440,10 @@ p {
   padding: 16px;
   overflow: auto;
   background: #f6f8f9;
+}
+.board-workspace .collaboration-grid {
+  display: block;
+  min-height: calc(100vh - 32px);
 }
 .board-workspace > .back,
 .board-workspace > .project-hero,
