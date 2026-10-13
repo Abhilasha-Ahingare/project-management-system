@@ -1,8 +1,56 @@
 import OpenAI from "openai";
 import env from "../config/env.js";
 
-const fallbackSummary = ({ participantsCount, activityCount, messages }) =>
-  `${participantsCount} participant(s), ${activityCount} board activities, and ${messages.length} chat message(s) were recorded.`;
+const summarizeDesign = (snapshot) => {
+  const counts = (snapshot?.elements || []).reduce((result, element) => {
+    if (element.isDeleted) return result;
+    const type = element.type || "other";
+    result[type] = (result[type] || 0) + 1;
+    return result;
+  }, {});
+  const summary = Object.entries(counts)
+    .map(([type, count]) => `${count} ${type}`)
+    .join(", ");
+  return summary || "No visible drawing elements were saved.";
+};
+
+const fallbackSummary = ({
+  participantsCount,
+  activityCount,
+  messages,
+  activities,
+  snapshot,
+}) => {
+  const discussion = messages.length
+    ? messages
+        .slice(0, 8)
+        .map((message) => {
+          const text = message.text?.trim();
+          const attachment = message.attachment?.originalName;
+          const content = [text, attachment && `attached ${attachment}`]
+            .filter(Boolean)
+            .join("; ");
+          return content
+            ? `${message.sender?.name || "Member"}: ${content}`
+            : null;
+        })
+        .filter(Boolean)
+        .join(" | ")
+    : "No chat messages were exchanged.";
+  const contributors = [
+    ...new Set(
+      activities.map((activity) => activity.actor?.name).filter(Boolean),
+    ),
+  ];
+  return [
+    `${participantsCount} participant(s) · ${messages.length} chat message(s) · ${activityCount} board updates.`,
+    `Discussion: ${discussion}`,
+    `Whiteboard saved with ${summarizeDesign(snapshot)}.`,
+    contributors.length ? `Contributors: ${contributors.join(", ")}.` : null,
+  ]
+    .filter(Boolean)
+    .join("\n");
+};
 
 const client = env.openaiApiKey
   ? new OpenAI({ apiKey: env.openaiApiKey })
@@ -13,11 +61,15 @@ export const generateCollaborationSummary = async ({
   participantsCount,
   activityCount,
   messages,
+  activities = [],
+  snapshot,
 }) => {
   const fallback = fallbackSummary({
     participantsCount,
     activityCount,
     messages,
+    activities,
+    snapshot,
   });
 
   if (!client) return { summary: fallback, summaryType: "deterministic" };
@@ -38,6 +90,18 @@ export const generateCollaborationSummary = async ({
 Title: ${title || "Collaboration session"}
 Participants: ${participantsCount}
 Board activities: ${activityCount}
+Saved whiteboard elements: ${summarizeDesign(snapshot)}
+
+Board activity log:
+${
+  activities
+    .slice(-80)
+    .map(
+      (activity) =>
+        `${activity.actor?.name || "Member"}: ${activity.type} (${JSON.stringify(activity.payload || {})})`,
+    )
+    .join("\n") || "No board changes recorded."
+}
 
 Chat transcript:
 ${transcript}

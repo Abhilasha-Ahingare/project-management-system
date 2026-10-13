@@ -1166,6 +1166,17 @@ p {
   margin-top: 3px;
   font-size: 12px;
 }
+.collaboration-create-board {
+  display: grid;
+  min-width: 0;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+}
+.collaboration-create-board .field {
+  width: 100%;
+  min-width: 0;
+}
 .collaboration-board-list {
   display: flex;
   flex-wrap: wrap;
@@ -1699,9 +1710,6 @@ p {
 }
 
 @media (max-width: 700px) {
-  .collaboration-page .collaboration-grid {
-    grid-template-columns: 1fr;
-  }
   .collaboration-picker-heading,
   .collaboration-history-header {
     align-items: flex-start;
@@ -2105,10 +2113,28 @@ p {
   .team-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
+  .collaboration-page:not(.board-workspace) .collaboration-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .collaboration-page:not(.board-workspace) .collaboration-sidebar,
+  .collaboration-page:not(.board-workspace) .collaboration-main {
+    width: 100%;
+  }
+  .collaboration-page:not(.board-workspace) .collaboration-create-board {
+    width: 100%;
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
 }
 @media (max-width: 1200px) and (min-width: 901px) {
   .team-grid {
     grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+  .collaboration-page:not(.board-workspace) .collaboration-grid {
+    grid-template-columns: minmax(180px, 0.75fr) minmax(0, 1.25fr);
+  }
+  .collaboration-page:not(.board-workspace) .collaboration-sidebar,
+  .collaboration-page:not(.board-workspace) .collaboration-main {
+    width: 100%;
   }
 }
 @media (max-width: 580px) {

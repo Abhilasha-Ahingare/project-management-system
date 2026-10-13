@@ -19,7 +19,7 @@ export const getMe = asyncHandler(async (req, res) => {
 });
 
 export const getUsers = asyncHandler(async (req, res) => {
-  const users = await getAllUsers();
+  const users = await getAllUsers(req.user.id);
   res
     .status(200)
     .json(new ApiResponse(200, users, "Users fetched successfully"));
@@ -47,7 +47,7 @@ export const deleteUser = asyncHandler(async (req, res) => {
 });
 
 export const searchUserController = asyncHandler(async (req, res) => {
-  const users = await searchUsers(req.query.q || "", req.user.id);
+  const users = await searchUsers(req.validated?.query?.q || "", req.user.id);
   res
     .status(200)
     .json(new ApiResponse(200, users, "Users searched successfully"));

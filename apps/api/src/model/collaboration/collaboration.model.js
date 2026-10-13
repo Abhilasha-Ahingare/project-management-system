@@ -87,6 +87,10 @@ const sessionSchema = new mongoose.Schema(
       ref: "Project",
       required: true,
     },
+    createdBy: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "User",
+    },
     startedAt: { type: Date, required: true },
     endedAt: { type: Date, default: null },
     title: {
@@ -111,6 +115,45 @@ const sessionSchema = new mongoose.Schema(
   { timestamps: true },
 );
 
+const joinRequestSchema = new mongoose.Schema(
+  {
+    board: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "CollaborationBoard",
+      required: true,
+      index: true,
+    },
+    session: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "CollaborationSession",
+      required: true,
+      index: true,
+    },
+    project: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Project",
+      required: true,
+    },
+    requester: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "User",
+      required: true,
+      index: true,
+    },
+    status: {
+      type: String,
+      enum: ["pending", "approved", "rejected", "expired"],
+      default: "pending",
+      index: true,
+    },
+    respondedBy: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
+    respondedAt: { type: Date, default: null },
+  },
+  { timestamps: true },
+);
+joinRequestSchema.index({ session: 1, requester: 1, status: 1 });
+joinRequestSchema.index({ requester: 1, session: 1, createdAt: -1 });
+
 export const CollaborationBoard = mongoose.model(
   "CollaborationBoard",
   boardSchema,
@@ -122,4 +165,8 @@ export const CollaborationActivity = mongoose.model(
 export const CollaborationSession = mongoose.model(
   "CollaborationSession",
   sessionSchema,
+);
+export const CollaborationJoinRequest = mongoose.model(
+  "CollaborationJoinRequest",
+  joinRequestSchema,
 );

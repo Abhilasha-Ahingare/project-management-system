@@ -2,7 +2,10 @@ import express from "express";
 
 import authMiddleware from "../../middleware/auth.middleware.js";
 import { requireSystemAdmin } from "../../middleware/authorization.middleware.js";
-import validate from "../../middleware/validation.middleware.js";
+import {
+  validateObjectIdParam,
+  default as validate,
+} from "../../middleware/validation.middleware.js";
 import {
   createProjectController,
   getProjects,
@@ -19,6 +22,8 @@ import {
 } from "./project.validation.js";
 
 const router = express.Router();
+router.param("projectId", validateObjectIdParam("projectId"));
+router.param("userId", validateObjectIdParam("userId"));
 
 router.use(authMiddleware);
 

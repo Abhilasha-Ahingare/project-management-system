@@ -41,19 +41,32 @@ const hasProjectAccess = async (project, userId) => {
 export const initializeRealtime = (httpServer) => {
   io = new Server(httpServer, {
     cors: {
-      origin: env.clientUrl,
+      origin: (origin, callback) => {
+        if (!origin || env.allowedOrigins.includes(origin)) {
+          callback(null, true);
+          return;
+        }
+        callback(new Error("Not allowed by CORS"));
+      },
       credentials: true,
     },
   });
 
-  io.use((socket, next) => {
+  io.use(async (socket, next) => {
     try {
       const token =
         socket.handshake.auth?.token ||
         socket.handshake.headers.authorization?.replace("Bearer ", "");
       if (!token) return next(new Error("Authentication required"));
 
-      const decoded = jwt.verify(token, env.jwtSecret);
+      const decoded = jwt.verify(token, env.jwtSecret, {
+        algorithms: ["HS256"],
+      });
+      const user = await User.findOne({
+        _id: decoded.userId,
+        isActive: true,
+      }).select("_id");
+      if (!user) return next(new Error("Account is inactive or unavailable"));
       socket.user = { id: decoded.userId };
       next();
     } catch (error) {
@@ -113,7 +126,12 @@ export const initializeRealtime = (httpServer) => {
 
     socket.on("join_collaboration_board", async (boardId, acknowledge) => {
       try {
-        await getBoardForUser(boardId, socket.user.id);
+        const access = await getBoardForUser(boardId, socket.user.id);
+        if (!access.canViewBoardContent) {
+          throw new Error(
+            "Meeting approval is required to enter this whiteboard",
+          );
+        }
         socket.join(collaborationRoom(boardId));
         const participant = await User.findById(socket.user.id).select(
           "_id name avatar",
@@ -194,6 +212,8 @@ const emit = (room, event, payload) => {
 
 export const emitProjectEvent = (projectId, event, payload) =>
   emit(projectRoom(projectId), event, payload);
+export const emitCollaborationEvent = (boardId, event, payload) =>
+  emit(collaborationRoom(boardId), event, payload);
 export const emitTaskEvent = (taskId, event, payload) =>
   emit(taskRoom(taskId), event, payload);
 export const emitUserEvent = (userId, event, payload) =>

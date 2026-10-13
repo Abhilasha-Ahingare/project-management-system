@@ -1,9 +1,14 @@
 import express from "express";
 import Joi from "joi";
 import authMiddleware from "../../middleware/auth.middleware.js";
-import validate from "../../middleware/validation.middleware.js";
+import {
+  validateObjectIdParam,
+  default as validate,
+} from "../../middleware/validation.middleware.js";
 import asyncHandler from "../../utils/asyncHandler.js";
 import ApiResponse from "../../utils/ApiResponse.js";
+import { aiRateLimiter } from "../../middleware/rate-limit.middleware.js";
+import { emitCollaborationEvent } from "../../realtime/socket.js";
 import {
   createBoard,
   getBoardForUser,
@@ -24,9 +29,21 @@ import {
   getSessionDetails,
   leaveBoardSession,
   askBoardAI,
+  requestToJoinBoardSession,
+  listPendingBoardJoinRequests,
+  respondToBoardJoinRequest,
 } from "./collaboration.service.js";
 
 const router = express.Router();
+for (const parameterName of [
+  "projectId",
+  "userId",
+  "boardId",
+  "requestId",
+  "sessionId",
+]) {
+  router.param(parameterName, validateObjectIdParam(parameterName));
+}
 const boardSchema = Joi.object({
   name: Joi.string().trim().min(2).max(120).required(),
   description: Joi.string().trim().max(1000).allow("").default(""),
@@ -51,6 +68,9 @@ const sessionSchema = Joi.object({
     .allow("")
     .default("Collaboration session"),
   sourceSessionId: Joi.string().hex().length(24).allow(null),
+});
+const joinRequestDecisionSchema = Joi.object({
+  decision: Joi.string().valid("approved", "rejected").required(),
 });
 
 router.use(authMiddleware);
@@ -142,9 +162,10 @@ router.post(
   asyncHandler(async (req, res) => {
     const invitations = await inviteBoardParticipants(
       req.params.boardId,
-      req.body.emails,
+      req.body.emails || [],
       req.body.permission,
       req.user.id,
+      req.body.userIds || [],
     );
     res
       .status(201)
@@ -155,6 +176,42 @@ router.post(
           "Collaboration invitations sent successfully",
         ),
       );
+  }),
+);
+router.get(
+  "/collaboration/boards/:boardId/join-requests",
+  asyncHandler(async (req, res) => {
+    const requests = await listPendingBoardJoinRequests(
+      req.params.boardId,
+      req.user.id,
+    );
+    res.json(new ApiResponse(200, requests, "Meeting join requests fetched"));
+  }),
+);
+router.post(
+  "/collaboration/boards/:boardId/join-requests",
+  asyncHandler(async (req, res) => {
+    const request = await requestToJoinBoardSession(
+      req.params.boardId,
+      req.user.id,
+    );
+    res
+      .status(201)
+      .json(new ApiResponse(201, request, "Join request sent to the meeting"));
+  }),
+);
+router.patch(
+  "/collaboration/join-requests/:requestId",
+  validate(joinRequestDecisionSchema),
+  asyncHandler(async (req, res) => {
+    const request = await respondToBoardJoinRequest(
+      req.params.requestId,
+      req.user.id,
+      req.body.decision,
+    );
+    res.json(
+      new ApiResponse(200, request, `Join request ${req.body.decision}`),
+    );
   }),
 );
 router.get(
@@ -199,6 +256,7 @@ router.get(
 );
 router.post(
   "/collaboration/boards/:boardId/ai",
+  aiRateLimiter,
   validate(
     Joi.object({ question: Joi.string().trim().min(2).max(2000).required() }),
   ),
@@ -248,6 +306,14 @@ router.post(
       req.user.id,
       req.body,
     );
+    emitCollaborationEvent(
+      req.params.boardId,
+      "collaboration_session_updated",
+      {
+        sessionId: session._id,
+        type: "updated",
+      },
+    );
     res
       .status(201)
       .json(
@@ -267,6 +333,10 @@ router.post(
       req.user.id,
       req.body || {},
     );
+    emitCollaborationEvent(session.board, "collaboration_session_updated", {
+      sessionId: session._id,
+      type: "started",
+    });
     res
       .status(201)
       .json(
@@ -278,6 +348,10 @@ router.patch(
   "/collaboration/sessions/:sessionId/end",
   asyncHandler(async (req, res) => {
     const session = await endBoardSession(req.params.sessionId, req.user.id);
+    emitCollaborationEvent(session.board, "collaboration_session_updated", {
+      sessionId: session._id,
+      type: "ended",
+    });
     res.json(
       new ApiResponse(200, session, "Collaboration session ended successfully"),
     );
@@ -287,6 +361,10 @@ router.delete(
   "/collaboration/sessions/:sessionId/participants/me",
   asyncHandler(async (req, res) => {
     const session = await leaveBoardSession(req.params.sessionId, req.user.id);
+    emitCollaborationEvent(session.board, "collaboration_session_updated", {
+      sessionId: session._id,
+      type: "participant-left",
+    });
     res.json(
       new ApiResponse(200, session, "You left the collaboration session"),
     );

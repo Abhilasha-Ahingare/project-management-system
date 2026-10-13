@@ -13,7 +13,7 @@ const refreshTokenCookieOptions = {
   httpOnly: true,
   secure: env.nodeEnv === "production",
   sameSite: "lax",
-  maxAge: 3650 * 24 * 60 * 60 * 1000,
+  maxAge: env.refreshTokenTtlMs,
   path: "/",
 };
 
@@ -54,9 +54,11 @@ export const refresh = asyncHandler(async (req, res) => {
 
   res.cookie(
     env.refreshTokenCookieName,
-    refreshToken,
+    result.refreshToken,
     refreshTokenCookieOptions,
   );
+
+  delete result.refreshToken;
 
   res
     .status(200)
@@ -68,7 +70,12 @@ export const logout = asyncHandler(async (req, res) => {
 
   await logoutUser(refreshToken);
 
-  res.clearCookie(env.refreshTokenCookieName, refreshTokenCookieOptions);
+  res.clearCookie(env.refreshTokenCookieName, {
+    httpOnly: refreshTokenCookieOptions.httpOnly,
+    secure: refreshTokenCookieOptions.secure,
+    sameSite: refreshTokenCookieOptions.sameSite,
+    path: refreshTokenCookieOptions.path,
+  });
 
   res.status(200).json(new ApiResponse(200, null, "Logout successful"));
 });

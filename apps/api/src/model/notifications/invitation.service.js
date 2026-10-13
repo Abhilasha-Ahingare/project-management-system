@@ -7,7 +7,13 @@ import ApiError from "../../utils/ApiError.js";
 import { sendInvitationEmail } from "../../utils/email.service.js";
 import { notifySafely } from "./notification.service.js";
 import { emitUserEvent } from "../../realtime/socket.js";
-import { CollaborationBoard } from "../collaboration/collaboration.model.js";
+import {
+  CollaborationBoard,
+  CollaborationSession,
+} from "../collaboration/collaboration.model.js";
+
+export const shouldSendInvitationEmail = (targetType) =>
+  !targetType.startsWith("Collaboration");
 
 const EXPIRY_HOURS = 24;
 
@@ -61,7 +67,13 @@ const canInvite = async (targetType, target, userId) => {
 
   if (
     targetType === "Collaboration" &&
-    target.createdBy.toString() === userId
+    (target.createdBy.toString() === userId ||
+      target.participants.some(
+        (participant) =>
+          participant.user.toString() === userId &&
+          participant.status === "accepted" &&
+          participant.permission === "manager",
+      ))
   ) {
     return { actor };
   }
@@ -89,6 +101,15 @@ export const createInvitation = async ({
   targetName,
 }) => {
   const target = await getTarget(targetType, targetId);
+  if (
+    targetType === "Collaboration" &&
+    (await CollaborationSession.exists({ board: target._id, endedAt: null }))
+  ) {
+    throw new ApiError(
+      409,
+      "Meeting invitations close when the meeting starts. Use a join request instead.",
+    );
+  }
   const { actor } = await canInvite(targetType, target, invitedBy);
   const normalizedEmail = String(email || "")
     .trim()
@@ -152,12 +173,11 @@ export const createInvitation = async ({
     role,
     expiresAt,
   });
-
   const notification = await Notification.create({
     recipient: recipient._id,
     type: "in-app",
     title: `You were invited to ${target.name}`,
-    message: `${actor.name} invited you to join ${targetType.toLowerCase()} "${target.name}". Respond within 24 hours.`,
+    message: `${actor.name} invited you to ${targetType === "CollaborationProject" ? "collaborate on project" : targetType === "Collaboration" ? "join whiteboard" : `join ${targetType.toLowerCase()}`} "${target.name}". Respond within ${EXPIRY_HOURS} hours.`,
     entityType: targetType,
     entityId: target._id,
     metadata: {
@@ -169,22 +189,24 @@ export const createInvitation = async ({
   });
 
   emitUserEvent(recipient._id.toString(), "notification:created", notification);
-  try {
-    await sendInvitationEmail({
-      recipient,
-      inviter: actor,
-      targetType,
-      targetName: target.name,
-      invitationId: invitation._id,
-      expiresAt,
-    });
-  } catch (error) {
-    console.error("[ProjectHub Email] invitation delivery failed", {
-      recipient: recipient.email,
-      code: error.code,
-      responseCode: error.responseCode,
-      message: error.message,
-    });
+  if (shouldSendInvitationEmail(targetType)) {
+    try {
+      await sendInvitationEmail({
+        recipient,
+        inviter: actor,
+        targetType,
+        targetName: target.name,
+        invitationId: invitation._id,
+        expiresAt,
+      });
+    } catch (error) {
+      console.error("[ProjectHub Email] invitation delivery failed", {
+        recipient: recipient.email,
+        code: error.code,
+        responseCode: error.responseCode,
+        message: error.message,
+      });
+    }
   }
 
   return invitation.populate([
@@ -213,13 +235,55 @@ export const respondToInvitation = async (invitationId, userId, decision) => {
 
   if (!invitation) throw new ApiError(404, "Pending invitation not found");
   if (invitation.expiresAt <= new Date()) {
+    const expiredAt = new Date();
     invitation.status = "expired";
-    invitation.respondedAt = new Date();
+    invitation.respondedAt = expiredAt;
     await invitation.save();
+    await Notification.updateMany(
+      {
+        recipient: userId,
+        "metadata.invitationId": invitation._id.toString(),
+      },
+      {
+        $set: {
+          isActive: false,
+          isRead: true,
+          readAt: expiredAt,
+          "metadata.status": "expired",
+        },
+      },
+    );
+    emitUserEvent(userId, "invitation:updated", {
+      _id: invitation._id,
+      targetType: invitation.targetType,
+      targetId: invitation.targetId,
+      status: "expired",
+    });
     throw new ApiError(410, "This invitation has expired");
   }
 
   if (decision === "accepted") {
+    if (
+      invitation.targetType === "Collaboration" &&
+      (await CollaborationSession.exists({
+        board: invitation.targetId,
+        endedAt: null,
+      }))
+    ) {
+      invitation.status = "expired";
+      invitation.respondedAt = new Date();
+      await invitation.save();
+      await Notification.updateOne(
+        { "metadata.invitationId": invitation._id.toString() },
+        {
+          $set: { isActive: false, isRead: true, "metadata.status": "expired" },
+        },
+      );
+      throw new ApiError(
+        410,
+        "This meeting invitation expired when the meeting started. Request to join the live meeting instead.",
+      );
+    }
     const Model =
       invitation.targetType === "Project" ||
       invitation.targetType === "CollaborationProject"
@@ -238,7 +302,13 @@ export const respondToInvitation = async (invitationId, userId, decision) => {
       const existing = target.participants.find(
         (participant) => participant.user.toString() === userId,
       );
-      if (!existing)
+      if (existing) {
+        existing.permission = invitation.role;
+        existing.status = "accepted";
+        existing.invitedBy = invitation.invitedBy;
+        existing.acceptedAt = new Date();
+        existing.joinedAt = new Date();
+      } else {
         target.participants.push({
           user: userId,
           permission: invitation.role,
@@ -247,15 +317,26 @@ export const respondToInvitation = async (invitationId, userId, decision) => {
           acceptedAt: new Date(),
           joinedAt: new Date(),
         });
+      }
     } else if (invitation.targetType === "CollaborationProject") {
       target.collaborators = target.collaborators || [];
-      target.collaborators.push({
-        user: userId,
-        permission: invitation.role,
-        status: "accepted",
-        invitedBy: invitation.invitedBy,
-        acceptedAt: new Date(),
-      });
+      const existing = target.collaborators.find(
+        (collaborator) => collaborator.user.toString() === userId,
+      );
+      if (existing) {
+        existing.permission = invitation.role;
+        existing.status = "accepted";
+        existing.invitedBy = invitation.invitedBy;
+        existing.acceptedAt = new Date();
+      } else {
+        target.collaborators.push({
+          user: userId,
+          permission: invitation.role,
+          status: "accepted",
+          invitedBy: invitation.invitedBy,
+          acceptedAt: new Date(),
+        });
+      }
     } else {
       const existing = target.members.find(
         (member) => member.user.toString() === userId,
@@ -274,7 +355,14 @@ export const respondToInvitation = async (invitationId, userId, decision) => {
   await invitation.save();
   await Notification.updateOne(
     { "metadata.invitationId": invitation._id.toString(), recipient: userId },
-    { $set: { isRead: true, readAt: new Date() } },
+    {
+      $set: {
+        isActive: false,
+        isRead: true,
+        readAt: new Date(),
+        "metadata.status": decision,
+      },
+    },
   );
   emitUserEvent(userId, "invitation:updated", invitation);
 
@@ -288,7 +376,7 @@ export const respondToInvitation = async (invitationId, userId, decision) => {
         invitationId: invitation._id.toString(),
         status: decision,
       },
-      sendEmail: true,
+      sendEmail: shouldSendInvitationEmail(invitation.targetType),
     },
     invitation.invitedBy,
   );
@@ -297,28 +385,62 @@ export const respondToInvitation = async (invitationId, userId, decision) => {
 };
 
 export const expireInvitations = async () => {
+  const now = new Date();
   const expired = await Invitation.find({
     status: "pending",
-    expiresAt: { $lte: new Date() },
-  });
+    expiresAt: { $lte: now },
+  }).select("_id recipient invitedBy targetType targetId targetName");
   if (!expired.length) return { expired: 0 };
 
-  await Invitation.updateMany(
-    { _id: { $in: expired.map((invitation) => invitation._id) } },
-    { $set: { status: "expired", respondedAt: new Date() } },
-  );
+  let expiredCount = 0;
+  for (const candidate of expired) {
+    const invitation = await Invitation.findOneAndUpdate(
+      {
+        _id: candidate._id,
+        status: "pending",
+        expiresAt: { $lte: now },
+      },
+      { $set: { status: "expired", respondedAt: now } },
+      { new: true },
+    );
+    if (!invitation) continue;
 
-  for (const invitation of expired) {
-    await Notification.create({
+    await Notification.updateMany(
+      {
+        recipient: invitation.recipient,
+        "metadata.invitationId": invitation._id.toString(),
+      },
+      {
+        $set: {
+          isActive: false,
+          isRead: true,
+          readAt: now,
+          "metadata.status": "expired",
+        },
+      },
+    );
+    const expirationNotice = await Notification.create({
       recipient: invitation.recipient,
       type: "in-app",
       title: "Invitation expired",
-      message: `Your invitation to join ${invitation.targetName} expired after 24 hours.`,
+      message: `Your invitation to join ${invitation.targetName} expired after ${EXPIRY_HOURS} hours.`,
       entityType: invitation.targetType,
       entityId: invitation.targetId,
       metadata: { invitationId: invitation._id.toString(), status: "expired" },
     });
+    emitUserEvent(invitation.recipient.toString(), "invitation:updated", {
+      _id: invitation._id,
+      targetType: invitation.targetType,
+      targetId: invitation.targetId,
+      status: "expired",
+    });
+    emitUserEvent(
+      invitation.recipient.toString(),
+      "notification:created",
+      expirationNotice,
+    );
+    expiredCount += 1;
   }
 
-  return { expired: expired.length };
+  return { expired: expiredCount };
 };

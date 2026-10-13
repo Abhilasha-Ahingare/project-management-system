@@ -41,6 +41,7 @@ export const registerUser = async ({ name, email, password }) => {
   await Session.create({
     user: user._id,
     refreshTokenHash: hashToken(refreshToken),
+    refreshTokenRotatedAt: new Date(),
     expiresAt: getRefreshTokenExpiry(),
   });
 
@@ -60,25 +61,17 @@ export const registerUser = async ({ name, email, password }) => {
 export const loginUser = async ({ email, password }) => {
   const normalizedEmail = email.toLowerCase().trim();
 
-  console.info("[ProjectHub Auth] login attempt", { email: normalizedEmail });
-
   const user = await User.findOne({
     email: normalizedEmail,
   }).select("+password");
 
   if (!user) {
-    console.warn("[ProjectHub Auth] user not found", {
-      email: normalizedEmail,
-    });
     throw new ApiError(401, "Invalid email or password");
   }
 
   const isPasswordValid = await bcrypt.compare(password, user.password);
 
   if (!isPasswordValid) {
-    console.warn("[ProjectHub Auth] invalid password", {
-      email: normalizedEmail,
-    });
     throw new ApiError(401, "Invalid email or password");
   }
 
@@ -98,6 +91,7 @@ export const loginUser = async ({ email, password }) => {
   await Session.create({
     user: user._id,
     refreshTokenHash: hashToken(refreshToken),
+    refreshTokenRotatedAt: new Date(),
     expiresAt: getRefreshTokenExpiry(),
   });
 
@@ -133,11 +127,7 @@ const hashToken = (token) => {
 };
 
 const getRefreshTokenExpiry = () => {
-  const expiry = new Date();
-
-  expiry.setDate(expiry.getDate() + 3650);
-
-  return expiry;
+  return new Date(Date.now() + env.refreshTokenTtlMs);
 };
 
 export const refreshAccessToken = async (refreshToken) => {
@@ -145,21 +135,63 @@ export const refreshAccessToken = async (refreshToken) => {
     throw new ApiError(401, "Refresh token is required");
   }
 
+  const now = new Date();
+  const currentTokenHash = hashToken(refreshToken);
   const session = await Session.findOne({
-    refreshTokenHash: hashToken(refreshToken),
+    refreshTokenHash: currentTokenHash,
     revokedAt: null,
-  }).populate("user");
+    expiresAt: { $gt: now },
+  }).populate({
+    path: "user",
+    select: "name email role designation isActive",
+  });
 
   if (!session || !session.user) {
     throw new ApiError(401, "Invalid or expired refresh token");
   }
+  if (
+    !session.refreshTokenRotatedAt &&
+    now.getTime() - session.createdAt.getTime() >= env.refreshTokenTtlMs
+  ) {
+    session.revokedAt = now;
+    session.expiresAt = now;
+    await session.save();
+    throw new ApiError(
+      401,
+      "Legacy refresh token has expired; please sign in again",
+    );
+  }
+  if (!session.user.isActive) {
+    session.revokedAt = now;
+    session.expiresAt = now;
+    await session.save();
+    throw new ApiError(401, "Account is inactive");
+  }
 
+  const rotatedRefreshToken = generateRefreshToken();
+  const rotatedSession = await Session.findOneAndUpdate(
+    {
+      _id: session._id,
+      refreshTokenHash: currentTokenHash,
+      revokedAt: null,
+      expiresAt: { $gt: now },
+    },
+    {
+      $set: {
+        refreshTokenHash: hashToken(rotatedRefreshToken),
+        refreshTokenRotatedAt: now,
+        expiresAt: getRefreshTokenExpiry(),
+      },
+    },
+    { new: true },
+  );
+  if (!rotatedSession)
+    throw new ApiError(401, "Refresh token has already been used");
   const accessToken = generateAccessToken(session.user._id);
-  session.expiresAt = getRefreshTokenExpiry();
-  await session.save();
 
   return {
     accessToken,
+    refreshToken: rotatedRefreshToken,
     user: {
       id: session.user._id,
       name: session.user.name,

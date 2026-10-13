@@ -6,7 +6,10 @@ import User from "../users/users.model.js";
 import File from "../files/file.model.js";
 import ApiError from "../../utils/ApiError.js";
 import { notifySafely } from "../notifications/notification.service.js";
-import { emitProjectEvent } from "../../realtime/socket.js";
+import {
+  emitCollaborationEvent,
+  emitProjectEvent,
+} from "../../realtime/socket.js";
 import { deleteStoredFile } from "../files/file.service.js";
 import { getAccessibleProject } from "../projects/project-access.service.js";
 import { getBoardForUser } from "../collaboration/collaboration.service.js";
@@ -14,23 +17,32 @@ import { getBoardForUser } from "../collaboration/collaboration.service.js";
 const assertScopeAccess = async (scopeType, scopeId, userId) => {
   if (scopeType === "Direct") {
     const recipient = await User.findOne({ _id: scopeId, isActive: true });
-    if (!recipient || recipient._id.toString() === userId)
-      throw new ApiError(403, "Direct chat access required");
+    if (!recipient) throw new ApiError(404, "Direct chat recipient not found");
     return recipient;
   }
-  if (scopeType === "Project" || scopeType === "Task") {
-    return getAccessibleProject(scopeId, userId);
-  }
   if (scopeType === "Task") {
-    const task = await Task.findOne({ _id: scopeId, isActive: true });
+    const task = await Task.findOne({ _id: scopeId, isActive: true }).select(
+      "project",
+    );
     if (!task) throw new ApiError(404, "Task not found");
     const project = await getAccessibleProject(task.project, userId);
     return { project: project._id };
   }
+  if (scopeType === "Project") {
+    return getAccessibleProject(scopeId, userId);
+  }
   if (scopeType === "CollaborationBoard") {
-    const { board } = await getBoardForUser(scopeId, userId);
+    const access = await getBoardForUser(scopeId, userId);
+    if (!access.canViewBoardContent) {
+      throw new ApiError(
+        403,
+        "Meeting approval is required to use this whiteboard chat.",
+      );
+    }
+    const { board } = access;
     return { project: board.project };
   }
+  if (scopeType !== "Team") throw new ApiError(400, "Invalid chat scope type");
   const team = await Team.findOne({ _id: scopeId, isActive: true });
   if (!team) throw new ApiError(404, "Team not found");
   const actor = await User.findById(userId).select("role isActive");
@@ -43,9 +55,29 @@ const assertScopeAccess = async (scopeType, scopeId, userId) => {
   return team;
 };
 
+const assertDirectMessageParticipant = (message, userId) => {
+  if (
+    message.scopeType === "Direct" &&
+    message.sender.toString() !== userId &&
+    message.scopeId.toString() !== userId
+  ) {
+    throw new ApiError(403, "Direct chat participant access required");
+  }
+};
+
 export const listMessages = async (scopeType, scopeId, userId) => {
   await assertScopeAccess(scopeType, scopeId, userId);
-  return Message.find({ scopeType, scopeId, isActive: true })
+  const query = { scopeType, scopeId, isActive: true };
+  if (scopeType === "Direct") {
+    if (scopeId.toString() === userId.toString())
+      throw new ApiError(400, "Choose another user for a direct conversation");
+    delete query.scopeId;
+    query.$or = [
+      { sender: userId, scopeId },
+      { sender: scopeId, scopeId: userId },
+    ];
+  }
+  return Message.find(query)
     .populate("sender", "name email designation")
     .populate("attachment", "originalName mimeType size")
     .populate("mentionedUsers", "name email")
@@ -60,6 +92,11 @@ export const createMessage = async (
   { text, attachmentId, mentionedUserIds = [] },
   userId,
 ) => {
+  if (scopeType === "Direct" && scopeId.toString() === userId.toString())
+    throw new ApiError(
+      400,
+      "You cannot start a direct conversation with yourself",
+    );
   const scope = await assertScopeAccess(scopeType, scopeId, userId);
   const projectId = scopeType === "Project" ? scopeId : scope.project;
   const project =
@@ -104,7 +141,9 @@ export const createMessage = async (
     { path: "mentionedUsers", select: "name email" },
   ]);
   const roomProjectId = scopeType === "Project" ? scopeId : scope.project;
-  if (roomProjectId)
+  if (scopeType === "CollaborationBoard")
+    emitCollaborationEvent(scopeId.toString(), "chat:message", populated);
+  else if (roomProjectId)
     emitProjectEvent(roomProjectId.toString(), "chat:message", populated);
   if (scopeType === "Project") {
     const projectMemberIds = [
@@ -165,6 +204,7 @@ export const pinMessage = async (messageId, isPinned, userId) => {
   const message = await Message.findOne({ _id: messageId, isActive: true });
   if (!message) throw new ApiError(404, "Message not found");
   await assertScopeAccess(message.scopeType, message.scopeId, userId);
+  assertDirectMessageParticipant(message, userId);
   message.isPinned = isPinned;
   message.pinnedAt = isPinned ? new Date() : null;
   message.pinnedBy = isPinned ? userId : null;
@@ -174,7 +214,13 @@ export const pinMessage = async (messageId, isPinned, userId) => {
     { path: "attachment", select: "originalName mimeType size" },
     { path: "pinnedBy", select: "name email" },
   ]);
-  if (message.scopeType === "Project")
+  if (message.scopeType === "CollaborationBoard")
+    emitCollaborationEvent(
+      message.scopeId.toString(),
+      "chat:message",
+      populated,
+    );
+  else if (message.scopeType === "Project")
     emitProjectEvent(message.scopeId.toString(), "chat:message", populated);
   return populated;
 };
@@ -183,13 +229,25 @@ export const permanentlyDeleteMessage = async (messageId, userId) => {
   const message = await Message.findById(messageId);
   if (!message) throw new ApiError(404, "Message not found");
   await assertScopeAccess(message.scopeType, message.scopeId, userId);
+  assertDirectMessageParticipant(message, userId);
+  const actor = await User.findById(userId).select("role isActive");
+  if (!actor?.isActive) throw new ApiError(403, "Active user account required");
+  if (message.sender.toString() !== userId && actor.role !== "admin")
+    throw new ApiError(
+      403,
+      "Only the message author or an administrator can delete it",
+    );
 
   if (message.attachment) {
     await deleteStoredFile(message.attachment);
   }
   await Message.deleteOne({ _id: message._id });
 
-  if (message.scopeType === "Project") {
+  if (message.scopeType === "CollaborationBoard") {
+    emitCollaborationEvent(message.scopeId.toString(), "chat:message-deleted", {
+      messageId: message._id,
+    });
+  } else if (message.scopeType === "Project") {
     emitProjectEvent(message.scopeId.toString(), "chat:message-deleted", {
       messageId: message._id,
     });
@@ -198,7 +256,14 @@ export const permanentlyDeleteMessage = async (messageId, userId) => {
 };
 
 export const permanentlyClearProjectMessages = async (projectId, userId) => {
-  await assertScopeAccess("Project", projectId, userId);
+  const project = await getAccessibleProject(projectId, userId);
+  const actor = await User.findById(userId).select("role isActive");
+  if (!actor?.isActive) throw new ApiError(403, "Active user account required");
+  if (actor.role !== "admin" && project.owner.toString() !== userId)
+    throw new ApiError(
+      403,
+      "Only the project owner or an administrator can clear project chat",
+    );
   const messages = await Message.find({
     scopeType: "Project",
     scopeId: projectId,

@@ -1,7 +1,11 @@
 import express from "express";
+import Joi from "joi";
 
 import authMiddleware from "../../middleware/auth.middleware.js";
-import validate from "../../middleware/validation.middleware.js";
+import {
+  validateObjectIdParam,
+  default as validate,
+} from "../../middleware/validation.middleware.js";
 import {
   createTaskController,
   getProjectTasksController,
@@ -17,6 +21,13 @@ import {
 } from "./task.report.controller.js";
 
 const router = express.Router();
+router.param("projectId", validateObjectIdParam("projectId"));
+router.param("taskId", validateObjectIdParam("taskId"));
+const taskQuerySchema = Joi.object({
+  status: Joi.string().valid("todo", "in-progress", "review", "done"),
+  priority: Joi.string().valid("low", "medium", "high", "urgent"),
+  assigneeId: Joi.string().hex().length(24),
+});
 
 router.use(authMiddleware);
 
@@ -28,7 +39,7 @@ router.get("/task-report", getTaskReportController);
 // Project tasks routes
 router
   .route("/projects/:projectId/tasks")
-  .get(getProjectTasksController)
+  .get(validate(taskQuerySchema, "query"), getProjectTasksController)
   .post(validate(createTaskSchema), createTaskController);
 
 // Single task routes

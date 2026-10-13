@@ -15,21 +15,37 @@ const startServer = async () => {
 
     const httpServer = createServer(app);
     initializeRealtime(httpServer);
+    await new Promise((resolve, reject) => {
+      const onError = (error) => {
+        httpServer.off("listening", onListening);
+        reject(error);
+      };
+      const onListening = () => {
+        httpServer.off("error", onError);
+        resolve();
+      };
+
+      httpServer.once("error", onError);
+      httpServer.once("listening", onListening);
+      httpServer.listen(env.port);
+    });
+
+    console.info("[ProjectHub API] started", {
+      port: env.port,
+      nodeEnv: env.nodeEnv,
+    });
     startInvitationExpiryJob();
     await verifyEmailTransport();
     await startNotificationWorker();
     await scheduleDueDateScan();
-
-    httpServer.listen(env.port, () => {
-      console.info("[ProjectHub API] started", {
-        port: env.port,
-        nodeEnv: env.nodeEnv,
-      });
-    });
   } catch (error) {
+    const message =
+      error.code === "EADDRINUSE"
+        ? `Port ${env.port} is already in use. Stop the other ProjectHub API process or set PORT to a free port before starting another instance.`
+        : error.message;
     console.error("[ProjectHub API] failed to start", {
-      message: error.message,
-      stack: error.stack,
+      message,
+      stack: env.nodeEnv === "development" ? error.stack : undefined,
     });
     process.exit(1);
   }

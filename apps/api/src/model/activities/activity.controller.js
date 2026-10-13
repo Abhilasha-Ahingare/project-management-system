@@ -10,10 +10,10 @@ import {
 } from "./activity.service.js";
 
 export const getEntityActivitiesController = asyncHandler(async (req, res) => {
-  const { entityType, entityId } = req.params;
-  const limit = req.query.limit ? parseInt(req.query.limit) : 20;
+  const { entityType, entityId } = req.validated?.params || req.params;
+  const limit = req.validated?.query?.limit ?? 20;
 
-  if (!["Project", "Task", "Team", "Comment"].includes(entityType)) {
+  if (!["Project", "Task", "Team"].includes(entityType)) {
     throw new ApiError(400, "Invalid entity type");
   }
 
@@ -30,8 +30,8 @@ export const getEntityActivitiesController = asyncHandler(async (req, res) => {
 });
 
 export const getContextActivitiesController = asyncHandler(async (req, res) => {
-  const { contextType, contextId } = req.params;
-  const limit = req.query.limit ? parseInt(req.query.limit) : 50;
+  const { contextType, contextId } = req.validated?.params || req.params;
+  const limit = req.validated?.query?.limit ?? 50;
 
   if (!["Project", "Team"].includes(contextType)) {
     throw new ApiError(400, "Invalid context type");
@@ -56,7 +56,7 @@ export const getContextActivitiesController = asyncHandler(async (req, res) => {
 });
 
 export const getUserActivityFeedController = asyncHandler(async (req, res) => {
-  const limit = req.query.limit ? parseInt(req.query.limit) : 30;
+  const limit = req.validated?.query?.limit ?? 30;
 
   const activities = await getUserActivityFeed(req.user.id, limit);
 
@@ -72,10 +72,10 @@ export const getUserActivityFeedController = asyncHandler(async (req, res) => {
 });
 
 export const getActorActivitiesController = asyncHandler(async (req, res) => {
-  const { actorId } = req.params;
-  const limit = req.query.limit ? parseInt(req.query.limit) : 30;
+  const { actorId } = req.validated?.params || req.params;
+  const limit = req.validated?.query?.limit ?? 30;
 
-  const activities = await getActorActivities(actorId, limit);
+  const activities = await getActorActivities(actorId, req.user.id, limit);
 
   res
     .status(200)

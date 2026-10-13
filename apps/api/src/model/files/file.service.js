@@ -3,6 +3,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import mongoose from "mongoose";
+import { fileTypeFromBuffer } from "file-type";
 import File from "./file.model.js";
 import Task from "../tasks/task.model.js";
 import User from "../users/users.model.js";
@@ -23,6 +24,21 @@ const allowedMimeTypes = new Set([
   "application/zip",
 ]);
 const maxFileSize = 10 * 1024 * 1024;
+
+export const getValidatedFileExtension = async (mimeType, buffer) => {
+  if (!allowedMimeTypes.has(mimeType) || !buffer?.length) return null;
+  if (mimeType === "text/plain") {
+    if (buffer.includes(0)) return null;
+    try {
+      new TextDecoder("utf-8", { fatal: true }).decode(buffer);
+      return "txt";
+    } catch {
+      return null;
+    }
+  }
+  const detected = await fileTypeFromBuffer(buffer);
+  return detected?.mime === mimeType ? detected.ext : null;
+};
 
 const getResourceProjectId = async (targetType, targetId) => {
   if (!mongoose.isValidObjectId(targetId)) {
@@ -49,14 +65,18 @@ export const saveUploadedFile = async ({
   userId,
 }) => {
   if (!file) throw new ApiError(400, "File is required");
-  if (!allowedMimeTypes.has(file.mimetype))
-    throw new ApiError(400, "File type is not allowed");
   if (file.size > maxFileSize)
     throw new ApiError(400, "File must be 10 MB or smaller");
+  const fileExtension = await getValidatedFileExtension(
+    file.mimetype,
+    file.buffer,
+  );
+  if (!fileExtension)
+    throw new ApiError(400, "File contents do not match an allowed file type");
   await assertAccess(targetType, targetId, userId);
 
   await fs.mkdir(uploadDirectory, { recursive: true });
-  const storageName = `${crypto.randomUUID()}${path.extname(file.originalname).toLowerCase()}`;
+  const storageName = `${crypto.randomUUID()}.${fileExtension}`;
   await fs.writeFile(path.join(uploadDirectory, storageName), file.buffer);
   return File.create({
     originalName: file.originalname,

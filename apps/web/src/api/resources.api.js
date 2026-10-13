@@ -88,6 +88,12 @@ export const collaboration = {
   detail: (boardId) => get(`/collaboration/boards/${boardId}`),
   invite: (boardId, data) =>
     write("post", `/collaboration/boards/${boardId}/invitations`, data),
+  requestJoin: (boardId) =>
+    write("post", `/collaboration/boards/${boardId}/join-requests`),
+  pendingJoinRequests: (boardId) =>
+    get(`/collaboration/boards/${boardId}/join-requests`),
+  respondJoinRequest: (requestId, decision) =>
+    write("patch", `/collaboration/join-requests/${requestId}`, { decision }),
   snapshot: (boardId) => get(`/collaboration/boards/${boardId}/snapshot`),
   saveSnapshot: (boardId, snapshot) =>
     write("post", `/collaboration/boards/${boardId}/snapshot`, { snapshot }),

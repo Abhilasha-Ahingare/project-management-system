@@ -19,8 +19,10 @@ import fileRoutes from "./model/files/file.route.js";
 import chatRoutes from "./model/chat/chat.route.js";
 import todoRoutes from "./model/todos/todo.route.js";
 import collaborationRoutes from "./model/collaboration/collaboration.route.js";
+import { apiRateLimiter } from "./middleware/rate-limit.middleware.js";
 
 const app = express();
+if (env.trustProxyHops > 0) app.set("trust proxy", env.trustProxyHops);
 
 app.use(helmet());
 
@@ -34,14 +36,19 @@ app.use(
         return;
       }
 
-      callback(new Error("Not allowed by CORS"));
+      const error = new Error("Not allowed by CORS");
+      error.statusCode = 403;
+      callback(error);
     },
     credentials: true,
   }),
 );
 
-app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
+app.use("/api", apiRateLimiter);
+app.use(express.json({ limit: "1mb" }));
+app.use(
+  express.urlencoded({ extended: false, limit: "1mb", parameterLimit: 50 }),
+);
 app.use(cookieParser());
 
 app.use((req, res, next) => {
@@ -49,13 +56,13 @@ app.use((req, res, next) => {
 
   console.info("[ProjectHub API] request started", {
     method: req.method,
-    path: req.originalUrl,
+    path: req.path,
   });
 
   res.on("finish", () => {
     console.info("[ProjectHub API] request finished", {
       method: req.method,
-      path: req.originalUrl,
+      path: req.path,
       statusCode: res.statusCode,
       durationMs: Date.now() - startedAt,
     });

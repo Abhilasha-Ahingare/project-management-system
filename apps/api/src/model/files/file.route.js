@@ -1,6 +1,7 @@
 import express from "express";
 import multer from "multer";
 import authMiddleware from "../../middleware/auth.middleware.js";
+import { validateObjectIdParam } from "../../middleware/validation.middleware.js";
 import {
   uploadFileController,
   listFilesController,
@@ -9,9 +10,17 @@ import {
 } from "./file.controller.js";
 
 const router = express.Router();
+router.param("fileId", validateObjectIdParam("fileId"));
+router.param("targetId", validateObjectIdParam("targetId"));
 const upload = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: 10 * 1024 * 1024 },
+  limits: {
+    fileSize: 10 * 1024 * 1024,
+    files: 1,
+    fields: 10,
+    fieldSize: 64 * 1024,
+    parts: 11,
+  },
 });
 
 router.use(authMiddleware);

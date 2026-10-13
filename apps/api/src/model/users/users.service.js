@@ -3,6 +3,7 @@ import User from "./users.model.js";
 import Team from "../teams/team.model.js";
 import Project from "../projects/project.model.js";
 import ApiError from "../../utils/ApiError.js";
+import { escapeRegex } from "../../utils/security.helpers.js";
 
 export const getCurrentUser = async (userId) => {
   const user = await User.findById(userId).select("-password");
@@ -14,8 +15,17 @@ export const getCurrentUser = async (userId) => {
   return user;
 };
 
-export const getAllUsers = async () => {
-  return User.find().select("-password").sort({ createdAt: -1 });
+export const getAllUsers = async (userId) => {
+  const actor = await User.findById(userId).select("role isActive");
+  if (!actor?.isActive) throw new ApiError(403, "Active user account required");
+  const query =
+    actor.role === "admin" ? User.find() : User.find({ isActive: true });
+  return query
+    .select(
+      actor.role === "admin" ? "-password" : "name email avatar designation",
+    )
+    .sort({ createdAt: -1 })
+    .limit(500);
 };
 
 export const createManagedUser = async (payload) => {
@@ -111,15 +121,18 @@ export const deleteManagedUser = async (userId, actorId) => {
 };
 
 export const searchUsers = async (query, userId) => {
-  const text = query.trim();
+  const text = String(query || "")
+    .trim()
+    .slice(0, 80);
   if (text.length < 2) return [];
+  const escapedText = escapeRegex(text);
   return User.find({
     isActive: true,
     _id: { $ne: userId },
     $or: [
-      { name: { $regex: text, $options: "i" } },
-      { email: { $regex: text, $options: "i" } },
-      { designation: { $regex: text, $options: "i" } },
+      { name: { $regex: escapedText, $options: "i" } },
+      { email: { $regex: escapedText, $options: "i" } },
+      { designation: { $regex: escapedText, $options: "i" } },
     ],
   })
     .select("name email designation")

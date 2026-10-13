@@ -1,7 +1,10 @@
 import express from "express";
 import Joi from "joi";
 import authMiddleware from "../../middleware/auth.middleware.js";
-import validate from "../../middleware/validation.middleware.js";
+import {
+  validateObjectIdParam,
+  default as validate,
+} from "../../middleware/validation.middleware.js";
 import asyncHandler from "../../utils/asyncHandler.js";
 import ApiResponse from "../../utils/ApiResponse.js";
 import {
@@ -13,12 +16,19 @@ import {
 } from "./chat.service.js";
 
 const router = express.Router();
+router.param("scopeId", validateObjectIdParam("scopeId"));
+router.param("messageId", validateObjectIdParam("messageId"));
+router.param("projectId", validateObjectIdParam("projectId"));
 const messageSchema = Joi.object({
   text: Joi.string().trim().max(4000).allow("").default(""),
   attachmentId: Joi.string().allow(null, ""),
   mentionedUserIds: Joi.array().items(Joi.string()).max(20).default([]),
 }).custom((value, helpers) => {
   if (!value.text && !value.attachmentId) return helpers.error("any.invalid");
+  if (value.attachmentId && value.attachmentId !== "") {
+    if (!/^[a-f\d]{24}$/i.test(value.attachmentId))
+      return helpers.error("any.invalid");
+  }
   return value;
 });
 router.use(authMiddleware);

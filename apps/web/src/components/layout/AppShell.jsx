@@ -20,6 +20,9 @@ import { setAccessToken } from "../../api/client";
 import { clear, toggle } from "../../app/store";
 import { connectRealtime } from "../../api/socket";
 import ErrorBoundary from "../ErrorBoundary";
+import InvitationActions from "../notifications/InvitationActions";
+import useInvitationResponse from "../notifications/useInvitationResponse";
+import { playNotificationSound } from "../../utils/notificationSound";
 const links = [
   ["/overview", "Overview", LayoutDashboard],
   ["/projects", "Projects", FolderKanban],
@@ -31,32 +34,6 @@ const links = [
 ];
 const list = (value) =>
   Array.isArray(value) ? value : value?.items || value?.data || [];
-
-const playNotificationSound = () => {
-  try {
-    const AudioContext = window.AudioContext || window.webkitAudioContext;
-    if (!AudioContext) return;
-    const context = new AudioContext();
-    const oscillator = context.createOscillator();
-    const gain = context.createGain();
-    oscillator.type = "sine";
-    oscillator.frequency.setValueAtTime(880, context.currentTime);
-    oscillator.frequency.exponentialRampToValueAtTime(
-      660,
-      context.currentTime + 0.14,
-    );
-    gain.gain.setValueAtTime(0.0001, context.currentTime);
-    gain.gain.exponentialRampToValueAtTime(0.12, context.currentTime + 0.02);
-    gain.gain.exponentialRampToValueAtTime(0.0001, context.currentTime + 0.2);
-    oscillator.connect(gain);
-    gain.connect(context.destination);
-    oscillator.start();
-    oscillator.stop(context.currentTime + 0.2);
-    oscillator.addEventListener("ended", () => context.close());
-  } catch {
-    // Browser autoplay policies may block notification audio.
-  }
-};
 
 const getChatRoute = (notification) => {
   const metadata = notification?.metadata || {};
@@ -99,6 +76,12 @@ export default function AppShell() {
     const socket = connectRealtime(token);
     const refreshNotifications = (notification) => {
       queryClient.invalidateQueries({ queryKey: ["notifications"] });
+      queryClient.invalidateQueries({ queryKey: ["invitations", "pending"] });
+      if (notification?.entityType === "CollaborationProject") {
+        queryClient.invalidateQueries({
+          queryKey: ["collaboration-project", notification.entityId],
+        });
+      }
       if (
         notification?.title === "New chat message" ||
         notification?.title === "You were mentioned in chat"
@@ -113,9 +96,33 @@ export default function AppShell() {
     };
     socket.on("notification:created", refreshNotifications);
     socket.on("invitation:updated", refreshNotifications);
+    const joinRequestUpdated = (event) => {
+      if (event?.status === "approved") {
+        toast.success("Your request was approved. Joining the meeting now.");
+        navigate(`/collaboration/${event.projectId}/${event.boardId}`);
+      } else if (event?.status === "rejected") {
+        toast.info("Your request to join the meeting was declined.");
+      } else if (event?.status === "expired") {
+        toast.info("The meeting ended before your request was reviewed.");
+      }
+      queryClient.invalidateQueries({ queryKey: ["collaboration-boards"] });
+      if (event?.boardId) {
+        queryClient.invalidateQueries({
+          queryKey: ["collaboration-board", event.boardId],
+        });
+        queryClient.invalidateQueries({
+          queryKey: ["collaboration-sessions", event.boardId],
+        });
+        queryClient.invalidateQueries({
+          queryKey: ["collaboration-join-requests", event.boardId],
+        });
+      }
+    };
+    socket.on("collaboration_join_request_updated", joinRequestUpdated);
     return () => {
       socket.off("notification:created", refreshNotifications);
       socket.off("invitation:updated", refreshNotifications);
+      socket.off("collaboration_join_request_updated", joinRequestUpdated);
       socket.disconnect();
     };
   }, [navigate, queryClient]);
@@ -123,6 +130,9 @@ export default function AppShell() {
     mutationFn: (id) => notifications.read(id),
     onSuccess: () =>
       queryClient.invalidateQueries({ queryKey: ["notifications"] }),
+  });
+  const respondToInvite = useInvitationResponse({
+    onAccepted: () => setNotificationsOpen(false),
   });
   const notificationItems = list(notificationQuery.data);
   const unreadCount = notificationItems.filter((item) => !item.isRead).length;
@@ -146,6 +156,7 @@ export default function AppShell() {
       await auth.logout();
     } finally {
       setAccessToken(null);
+      queryClient.clear();
       dispatch(clear());
       navigate("/login");
     }
@@ -219,17 +230,37 @@ export default function AppShell() {
                     </NavLink>
                   </div>
                   {notificationItems.length ? (
-                    notificationItems.map((item) => (
-                      <button
-                        className={`notification-item ${item.isRead ? "read" : "unread"}`}
-                        type="button"
-                        key={item._id || item.id}
-                        onClick={() => openNotification(item)}
-                      >
-                        <strong>{item.title}</strong>
-                        <span>{item.message}</span>
-                      </button>
-                    ))
+                    <div className="notification-panel-list">
+                      {notificationItems.map((item) => {
+                        const invitationId = item.metadata?.invitationId;
+                        const isPendingInvitation =
+                          invitationId && item.metadata?.status === "pending";
+                        return (
+                          <div
+                            className={`notification-item ${item.isRead ? "read" : "unread"}`}
+                            key={item._id || item.id}
+                          >
+                            <button
+                              className="notification-item-content"
+                              type="button"
+                              onClick={() => openNotification(item)}
+                            >
+                              <strong>{item.title}</strong>
+                              <span>{item.message}</span>
+                            </button>
+                            {isPendingInvitation && (
+                              <InvitationActions
+                                invitationId={invitationId}
+                                disabled={respondToInvite.isPending}
+                                onRespond={(id, decision) =>
+                                  respondToInvite.mutate({ id, decision })
+                                }
+                              />
+                            )}
+                          </div>
+                        );
+                      })}
+                    </div>
                   ) : (
                     <span className="notification-empty">
                       No notifications yet.

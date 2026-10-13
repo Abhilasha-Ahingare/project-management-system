@@ -7,16 +7,24 @@ import { getAccessibleProject } from "../projects/project-access.service.js";
 import {
   CollaborationActivity,
   CollaborationBoard,
+  CollaborationJoinRequest,
   CollaborationSession,
 } from "./collaboration.model.js";
 import { createInvitation } from "../notifications/invitation.service.js";
 import Invitation from "../notifications/invitation.model.js";
+import Notification from "../notifications/notification.model.js";
+import {
+  emitCollaborationEvent,
+  emitUserEvent,
+} from "../../realtime/socket.js";
 import {
   askCollaborationAI,
   generateCollaborationSummary,
 } from "../../utils/collaboration-summary.service.js";
 
 const boardIdOf = (board) => board._id.toString();
+const sessionCreatorId = (session) =>
+  (session.createdBy || session.participants[0])?.toString();
 
 const getBoard = async (boardId) => {
   const board = await CollaborationBoard.findOne({
@@ -169,9 +177,26 @@ export const removeProjectCollaborator = async (
 
 export const listBoards = async (projectId, userId) => {
   await getAccessibleProject(projectId, userId);
-  return CollaborationBoard.find({ project: projectId, isActive: true })
+  const boards = await CollaborationBoard.find({
+    project: projectId,
+    isActive: true,
+  })
     .populate("createdBy", "name email")
     .sort({ createdAt: -1 });
+  if (!boards.length) return boards;
+
+  const activeSessions = await CollaborationSession.find({
+    board: { $in: boards.map((board) => board._id) },
+    endedAt: null,
+  }).populate("participants", "name avatar");
+  const sessionsByBoard = new Map(
+    activeSessions.map((session) => [session.board.toString(), session]),
+  );
+
+  return boards.map((board) => ({
+    ...board.toObject(),
+    activeSession: sessionsByBoard.get(board._id.toString()) || null,
+  }));
 };
 
 export const createBoard = async (projectId, payload, userId) => {
@@ -181,8 +206,7 @@ export const createBoard = async (projectId, payload, userId) => {
   const collaborator = project.collaborators?.find(
     (item) => item.user.toString() === userId && item.status === "accepted",
   );
-  const canCreate =
-    member || actor?.role === "admin" || collaborator?.permission === "manager";
+  const canCreate = member || actor?.role === "admin" || Boolean(collaborator);
   if (!canCreate)
     throw new ApiError(403, "Only project managers can create whiteboards");
   const board = await CollaborationBoard.create({
@@ -222,6 +246,10 @@ export const getBoardForUser = async (boardId, userId) => {
   );
   const member = await isProjectMember(project, userId);
   const actor = await User.findById(userId).select("role");
+  const activeSession = await CollaborationSession.findOne({
+    board: board._id,
+    endedAt: null,
+  }).select("_id createdBy participants startedAt");
   if (
     actor?.role !== "admin" &&
     !participant &&
@@ -230,41 +258,83 @@ export const getBoardForUser = async (boardId, userId) => {
     board.createdBy.toString() !== userId
   )
     throw new ApiError(403, "Collaboration access required");
+  const isManager =
+    actor?.role === "admin" ||
+    board.createdBy.toString() === userId ||
+    participant?.permission === "manager";
   const populatedBoard = await board.populate([
     { path: "createdBy", select: "name email avatar" },
     { path: "participants.user", select: "name email avatar" },
   ]);
+  
+  const pendingInvitations = await Invitation.find({
+    targetType: "Collaboration",
+    targetId: board._id,
+    status: "pending",
+    expiresAt: { $gt: new Date() },
+  }).populate("recipient", "name email avatar");
+  const projectMemberAccess = member || Boolean(collaborator);
+  const canViewBoardContent =
+    isManager ||
+    participant?.status === "accepted" ||
+    (!activeSession && projectMemberAccess);
+  const myJoinRequest =
+    activeSession && !participant
+      ? await CollaborationJoinRequest.findOne({
+          session: activeSession._id,
+          requester: userId,
+          status: "pending",
+        }).select("_id status createdAt")
+      : null;
+  const boardResult = populatedBoard.toObject();
+  if (!canViewBoardContent) boardResult.snapshot = null;
   return {
-    board: populatedBoard,
+    board: boardResult,
     participant,
-    isManager:
-      member ||
-      actor?.role === "admin" ||
-      board.createdBy.toString() === userId ||
-      participant?.permission === "manager" ||
-      collaborator?.permission === "manager",
+    activeSession,
+    canViewBoardContent,
+    projectMemberAccess,
+    myJoinRequest,
+    canRequestJoin: Boolean(
+      activeSession && (member || collaborator) && !participant,
+    ),
+    pendingInvitations,
+    isManager,
     isEditor:
-      member ||
-      actor?.role === "admin" ||
-      board.createdBy.toString() === userId ||
-      ["manager", "editor"].includes(
-        participant?.permission || collaborator?.permission,
-      ),
+      isManager ||
+      (participant?.status === "accepted" &&
+        ["manager", "editor"].includes(participant.permission)) ||
+      (!activeSession && projectMemberAccess),
   };
 };
 
 export const inviteBoardParticipants = async (
   boardId,
-  emails,
+  emails = [],
   permission,
   userId,
+  userIds = [],
 ) => {
   const { board, isManager } = await getBoardForUser(boardId, userId);
   if (!isManager)
     throw new ApiError(403, "Only board managers can invite collaborators");
+  if (await CollaborationSession.exists({ board: board._id, endedAt: null })) {
+    throw new ApiError(
+      409,
+      "Invitations close when the meeting starts. Ask the person to request to join instead.",
+    );
+  }
   const project = await Project.findById(board.project).select("name");
+  const selectedUsers = await User.find({
+    ...(userIds.length
+      ? { _id: { $in: userIds } }
+      : { email: { $in: emails.map((email) => email.toLowerCase()) } }),
+    isActive: true,
+  }).select("email");
   const invitations = [];
-  for (const email of [...new Set(emails)]) {
+  for (const email of [
+    ...new Set(selectedUsers.map((selectedUser) => selectedUser.email)),
+  ]) {
     const invitation = await createInvitation({
       targetType: "Collaboration",
       targetId: board._id,
@@ -289,7 +359,10 @@ export const updateBoardSnapshot = async (boardId, snapshot, userId) => {
 };
 
 export const listBoardHistory = async (boardId, userId) => {
-  const { board } = await getBoardForUser(boardId, userId);
+  const { board, participant, isManager, activeSession, projectMemberAccess } =
+    await getBoardForUser(boardId, userId);
+  if (!participant && !isManager && (activeSession || !projectMemberAccess))
+    throw new ApiError(403, "Meeting approval is required to view history.");
   return CollaborationActivity.find({ board: board._id })
     .populate("actor", "name email")
     .sort({ createdAt: -1 })
@@ -297,7 +370,10 @@ export const listBoardHistory = async (boardId, userId) => {
 };
 
 export const askBoardAI = async (boardId, question, userId) => {
-  const { board } = await getBoardForUser(boardId, userId);
+  const { board, participant, isManager, activeSession, projectMemberAccess } =
+    await getBoardForUser(boardId, userId);
+  if (!participant && !isManager && (activeSession || !projectMemberAccess))
+    throw new ApiError(403, "Meeting approval is required to ask board AI.");
   const [messages, activities] = await Promise.all([
     Message.find({
       scopeType: "CollaborationBoard",
@@ -338,7 +414,16 @@ export const askBoardAI = async (boardId, question, userId) => {
 };
 
 export const getBoardSessions = async (boardId, userId) => {
-  const { board } = await getBoardForUser(boardId, userId);
+  const { board, participant, isManager, activeSession, projectMemberAccess } =
+    await getBoardForUser(boardId, userId);
+  if (!participant && !isManager && activeSession) {
+    return CollaborationSession.find({ board: board._id, endedAt: null })
+      .select("board project startedAt endedAt title participants")
+      .populate("participants", "name avatar")
+      .sort({ startedAt: -1 });
+  }
+  if (!participant && !isManager && !projectMemberAccess)
+    throw new ApiError(403, "Project membership is required to view sessions.");
   return CollaborationSession.find({ board: board._id })
     .populate("participants", "name email")
     .sort({ startedAt: -1 });
@@ -350,7 +435,16 @@ export const getSessionDetails = async (sessionId, userId) => {
     "name email avatar",
   );
   if (!session) throw new ApiError(404, "Collaboration session not found");
-  await getBoardForUser(session.board, userId);
+  const access = await getBoardForUser(session.board, userId);
+  if (
+    !access.participant &&
+    !access.isManager &&
+    (access.activeSession || !access.projectMemberAccess || !session.endedAt)
+  )
+    throw new ApiError(
+      403,
+      "Meeting approval is required to view this session.",
+    );
   const messages = await Message.find({
     _id: { $in: session.chatMessageIds || [] },
     isActive: true,
@@ -361,7 +455,10 @@ export const getSessionDetails = async (sessionId, userId) => {
 };
 
 export const startBoardSession = async (boardId, userId, payload = {}) => {
-  const { board } = await getBoardForUser(boardId, userId);
+  const { board, participant, isManager } = await getBoardForUser(
+    boardId,
+    userId,
+  );
   if (payload.sourceSessionId) {
     const source = await CollaborationSession.findOne({
       _id: payload.sourceSessionId,
@@ -380,19 +477,37 @@ export const startBoardSession = async (boardId, userId, payload = {}) => {
     endedAt: null,
   });
   if (activeSession) {
+    if (!participant && !isManager) {
+      throw new ApiError(
+        403,
+        "Request approval is required to join this active meeting.",
+      );
+    }
     if (!activeSession.participants.some((id) => id.toString() === userId)) {
       activeSession.participants.push(userId);
       await activeSession.save();
+      emitCollaborationEvent(board._id, "collaboration_session_updated", {
+        sessionId: activeSession._id,
+        type: "participant-joined",
+      });
     }
     return activeSession;
+  }
+  if (!participant && !isManager) {
+    throw new ApiError(
+      403,
+      "Only an invited or approved collaborator can start this meeting.",
+    );
   }
   const session = await CollaborationSession.create({
     board: board._id,
     project: board.project,
+    createdBy: userId,
     startedAt: new Date(),
     title: payload.title?.trim() || "Collaboration session",
     participants: [userId],
   });
+  await expirePendingBoardInvitations(board._id);
   await CollaborationActivity.create({
     board: board._id,
     project: board.project,
@@ -401,6 +516,200 @@ export const startBoardSession = async (boardId, userId, payload = {}) => {
     payload: { sessionId: session._id },
   });
   return session;
+};
+
+const expirePendingBoardInvitations = async (boardId) => {
+  const pending = await Invitation.find({
+    targetType: "Collaboration",
+    targetId: boardId,
+    status: "pending",
+  });
+  if (!pending.length) return;
+  const now = new Date();
+  await Invitation.updateMany(
+    { _id: { $in: pending.map((invitation) => invitation._id) } },
+    { $set: { status: "expired", respondedAt: now } },
+  );
+  await Notification.updateMany(
+    {
+      "metadata.invitationId": {
+        $in: pending.map((invitation) => invitation._id.toString()),
+      },
+    },
+    {
+      $set: {
+        isActive: false,
+        isRead: true,
+        readAt: now,
+        "metadata.status": "expired",
+      },
+    },
+  );
+  for (const invitation of pending) {
+    emitUserEvent(invitation.recipient.toString(), "invitation:updated", {
+      _id: invitation._id,
+      targetType: invitation.targetType,
+      targetId: invitation.targetId,
+      status: "expired",
+    });
+  }
+};
+
+export const requestToJoinBoardSession = async (boardId, userId) => {
+  const { board, participant, activeSession, canRequestJoin } =
+    await getBoardForUser(boardId, userId);
+  if (!activeSession)
+    throw new ApiError(409, "There is no active meeting to request to join.");
+  if (participant?.status === "accepted")
+    throw new ApiError(409, "You already have access to this whiteboard.");
+  if (!canRequestJoin)
+    throw new ApiError(403, "Only project team members can request to join.");
+
+  const existing = await CollaborationJoinRequest.findOne({
+    session: activeSession._id,
+    requester: userId,
+    status: "pending",
+  }).populate("requester", "name email avatar");
+  if (existing) return existing;
+
+  const oneHourAgo = new Date(Date.now() - 60 * 60 * 1000);
+  const requestCount = await CollaborationJoinRequest.countDocuments({
+    session: activeSession._id,
+    requester: userId,
+    createdAt: { $gte: oneHourAgo },
+  });
+  if (requestCount >= 5) {
+    throw new ApiError(
+      429,
+      "You have reached the limit of 5 join requests for this meeting per hour.",
+    );
+  }
+
+  const request = await CollaborationJoinRequest.create({
+    board: board._id,
+    session: activeSession._id,
+    project: board.project,
+    requester: userId,
+  });
+  const populated = await request.populate("requester", "name email avatar");
+  emitUserEvent(
+    sessionCreatorId(activeSession),
+    "collaboration_join_request_created",
+    {
+      request: populated,
+      boardId: board._id,
+      projectId: board.project,
+    },
+  );
+  return populated;
+};
+
+export const listPendingBoardJoinRequests = async (boardId, userId) => {
+  const { board, activeSession } = await getBoardForUser(boardId, userId);
+  if (!activeSession) return [];
+  if (sessionCreatorId(activeSession) !== userId)
+    throw new ApiError(403, "Only the meeting creator can view join requests.");
+  return CollaborationJoinRequest.find({
+    board: board._id,
+    session: activeSession._id,
+    status: "pending",
+  })
+    .populate("requester", "name email avatar")
+    .sort({ createdAt: 1 });
+};
+
+export const respondToBoardJoinRequest = async (
+  requestId,
+  userId,
+  decision,
+) => {
+  const request = await CollaborationJoinRequest.findOne({
+    _id: requestId,
+    status: "pending",
+  });
+  if (!request) throw new ApiError(404, "Pending join request not found.");
+  const { board, activeSession } = await getBoardForUser(request.board, userId);
+  if (
+    !activeSession ||
+    activeSession._id.toString() !== request.session.toString()
+  )
+    throw new ApiError(410, "This meeting has ended; the request expired.");
+  if (sessionCreatorId(activeSession) !== userId)
+    throw new ApiError(
+      403,
+      "Only the meeting creator can respond to join requests.",
+    );
+  if (request.requester.toString() === userId)
+    throw new ApiError(403, "You cannot respond to your own join request.");
+
+  request.status = decision;
+  request.respondedBy = userId;
+  request.respondedAt = new Date();
+  await request.save();
+
+  if (decision === "approved") {
+    const boardParticipant = board.participants.find(
+      (item) => item.user.toString() === request.requester.toString(),
+    );
+    if (boardParticipant) {
+      boardParticipant.permission = "editor";
+      boardParticipant.status = "accepted";
+      boardParticipant.invitedBy = userId;
+      boardParticipant.acceptedAt = new Date();
+      boardParticipant.joinedAt = new Date();
+    } else {
+      board.participants.push({
+        user: request.requester,
+        permission: "editor",
+        status: "accepted",
+        invitedBy: userId,
+        acceptedAt: new Date(),
+        joinedAt: new Date(),
+      });
+    }
+    if (
+      !activeSession.participants.some(
+        (participant) =>
+          participant.toString() === request.requester.toString(),
+      )
+    ) {
+      activeSession.participants.push(request.requester);
+    }
+    await Promise.all([board.save(), activeSession.save()]);
+    await CollaborationActivity.create({
+      board: board._id,
+      project: board.project,
+      actor: userId,
+      type: "participant.joined",
+      payload: {
+        userId: request.requester.toString(),
+        source: "approved-request",
+      },
+    });
+  }
+
+  const populated = await request.populate([
+    { path: "requester", select: "name email avatar" },
+    { path: "respondedBy", select: "name avatar" },
+  ]);
+  emitCollaborationEvent(board._id, "collaboration_join_request_updated", {
+    request: populated,
+  });
+  emitCollaborationEvent(board._id, "collaboration_session_updated", {
+    sessionId: activeSession._id,
+    type: decision === "approved" ? "participant-joined" : "request-rejected",
+  });
+  emitUserEvent(
+    request.requester.toString(),
+    "collaboration_join_request_updated",
+    {
+      requestId: request._id,
+      status: decision,
+      boardId: board._id,
+      projectId: board.project,
+    },
+  );
+  return populated;
 };
 
 export const continueBoardSession = async (sessionId, userId, payload = {}) => {
@@ -425,7 +734,7 @@ export const endBoardSession = async (sessionId, userId) => {
   if (session.endedAt) return session;
 
   const endedAt = new Date();
-  const [messages, activityCount] = await Promise.all([
+  const [messages, activities] = await Promise.all([
     Message.find({
       scopeType: "CollaborationBoard",
       scopeId: board._id,
@@ -433,12 +742,18 @@ export const endBoardSession = async (sessionId, userId) => {
       createdAt: { $gte: session.startedAt, $lte: endedAt },
     })
       .populate("sender", "name")
-      .select("_id text sender"),
-    CollaborationActivity.countDocuments({
+      .populate("attachment", "originalName")
+      .select("_id text sender attachment"),
+    CollaborationActivity.find({
       board: board._id,
-      createdAt: { $gte: session.startedAt },
-    }),
+      createdAt: { $gte: session.startedAt, $lte: endedAt },
+    })
+      .populate("actor", "name")
+      .select("actor type payload createdAt")
+      .sort({ createdAt: 1 })
+      .limit(500),
   ]);
+  const activityCount = activities.length;
   session.endedAt = endedAt;
   session.durationSeconds = Math.max(
     0,
@@ -453,10 +768,34 @@ export const endBoardSession = async (sessionId, userId) => {
     participantsCount: session.participants.length,
     activityCount,
     messages,
+    activities,
+    snapshot: board.snapshot,
   });
   session.summary = generatedSummary.summary;
   session.summaryType = generatedSummary.summaryType;
   await session.save();
+  const pendingJoinRequests = await CollaborationJoinRequest.find({
+    session: session._id,
+    status: "pending",
+  });
+  if (pendingJoinRequests.length) {
+    await CollaborationJoinRequest.updateMany(
+      { _id: { $in: pendingJoinRequests.map((request) => request._id) } },
+      { $set: { status: "expired", respondedAt: endedAt } },
+    );
+    for (const request of pendingJoinRequests) {
+      emitUserEvent(
+        request.requester.toString(),
+        "collaboration_join_request_updated",
+        {
+          requestId: request._id,
+          status: "expired",
+          boardId: board._id,
+          projectId: board.project,
+        },
+      );
+    }
+  }
   await CollaborationActivity.create({
     board: board._id,
     project: board.project,
@@ -488,7 +827,9 @@ export const leaveBoardSession = async (sessionId, userId) => {
 };
 
 export const getBoardSnapshot = async (boardId, userId) => {
-  const { board } = await getBoardForUser(boardId, userId);
+  const { board, canViewBoardContent } = await getBoardForUser(boardId, userId);
+  if (!canViewBoardContent)
+    throw new ApiError(403, "Meeting approval is required to view the board.");
   return { snapshot: board.snapshot, version: board.snapshotVersion };
 };
 

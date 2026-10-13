@@ -100,86 +100,19 @@ export default function App() {
           }
         >
           <Route index element={<Navigate to="overview" replace />} />
-          <Route
-            path="overview"
-            element={
-              <PageBoundary>
-                <OverviewPage />
-              </PageBoundary>
-            }
-          />
-          <Route
-            path="projects"
-            element={
-              <PageBoundary>
-                <ProjectsPage />
-              </PageBoundary>
-            }
-          />
-          <Route
-            path="projects/:projectId"
-            element={
-              <PageBoundary>
-                <ProjectDetailsPage />
-              </PageBoundary>
-            }
-          />
+          <Route path="overview" element={<OverviewPage />} />
+          <Route path="projects" element={<ProjectsPage />} />
+          <Route path="projects/:projectId" element={<ProjectDetailsPage />} />
 
-          <Route
-            path="tasks"
-            element={
-              <PageBoundary>
-                <TasksPage />
-              </PageBoundary>
-            }
-          />
-          <Route
-            path="tasks/:taskId"
-            element={
-              <PageBoundary>
-                <TaskPage />
-              </PageBoundary>
-            }
-          />
-          <Route
-            path="members"
-            element={
-              <PageBoundary>
-                <MembersPage />
-              </PageBoundary>
-            }
-          />
-          <Route
-            path="teams"
-            element={
-              <PageBoundary>
-                <TeamsPage />
-              </PageBoundary>
-            }
-          />
-          <Route
-            path="notifications"
-            element={
-              <PageBoundary>
-                <NotificationsPage />
-              </PageBoundary>
-            }
-          />
-          <Route
-            path="collaboration"
-            element={
-              <PageBoundary>
-                <CollaborationPage />
-              </PageBoundary>
-            }
-          />
+          <Route path="tasks" element={<TasksPage />} />
+          <Route path="tasks/:taskId" element={<TaskPage />} />
+          <Route path="members" element={<MembersPage />} />
+          <Route path="teams" element={<TeamsPage />} />
+          <Route path="notifications" element={<NotificationsPage />} />
+          <Route path="collaboration" element={<CollaborationPage />} />
           <Route
             path="collaboration/:projectId/:boardId?"
-            element={
-              <PageBoundary>
-                <CollaborationPage />
-              </PageBoundary>
-            }
+            element={<CollaborationPage />}
           />
         </Route>
         <Route path="/app/*" element={<LegacyAppRedirect />} />

@@ -1,6 +1,9 @@
 import express from "express";
 import authMiddleware from "../../middleware/auth.middleware.js";
-import validate from "../../middleware/validation.middleware.js";
+import {
+  validateObjectIdParam,
+  default as validate,
+} from "../../middleware/validation.middleware.js";
 import {
   createInvitationController,
   getPendingInvitationsController,
@@ -12,6 +15,7 @@ import {
 } from "./invitation.validation.js";
 
 const router = express.Router();
+router.param("invitationId", validateObjectIdParam("invitationId"));
 
 router.use(authMiddleware);
 router.get("/invitations", getPendingInvitationsController);

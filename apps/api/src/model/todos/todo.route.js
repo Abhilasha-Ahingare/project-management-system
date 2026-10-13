@@ -1,7 +1,10 @@
 import express from "express";
 import Joi from "joi";
 import authMiddleware from "../../middleware/auth.middleware.js";
-import validate from "../../middleware/validation.middleware.js";
+import {
+  validateObjectIdParam,
+  default as validate,
+} from "../../middleware/validation.middleware.js";
 import asyncHandler from "../../utils/asyncHandler.js";
 import ApiResponse from "../../utils/ApiResponse.js";
 import {
@@ -12,6 +15,8 @@ import {
 } from "./todo.service.js";
 
 const router = express.Router();
+router.param("projectId", validateObjectIdParam("projectId"));
+router.param("todoId", validateObjectIdParam("todoId"));
 const createSchema = Joi.object({
   title: Joi.string().trim().min(1).max(240).required(),
 });

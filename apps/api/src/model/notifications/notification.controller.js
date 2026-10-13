@@ -19,7 +19,10 @@ export const createNotificationController = asyncHandler(async (req, res) => {
 });
 
 export const getNotificationsController = asyncHandler(async (req, res) => {
-  const notifications = await getUserNotifications(req.user.id, req.query);
+  const notifications = await getUserNotifications(
+    req.user.id,
+    req.validated?.query || {},
+  );
   res
     .status(200)
     .json(
